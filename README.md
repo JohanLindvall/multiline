@@ -43,14 +43,55 @@ don't need one). `Multiline` is not safe for concurrent use.
 
 ### Key methods
 
-- `New[T](emit)` — create an aggregator using the built-in matcher.
-- `NewWithMatcher[T](matcher, emit)` — create an aggregator with a custom
-  `Matcher` (see below).
+- `New[T](emit, opts...)` — create an aggregator. Defaults to the built-in
+  matcher; pass `WithMatcher(m)` for a custom `Matcher` (see below).
+- `NewPattern[T](pattern, negate, match, emit, opts...)` — create an aggregator
+  driven by a single regex (see [Pattern matching](#pattern-matching)).
 - `Add(ctx, line, key, data)` — feed one line. An empty `key` bypasses
   aggregation and emits immediately.
 - `FlushBefore(ctx, t)` — emit pending groups last touched before `t` (useful
   for time-based flushing of stale entries).
 - `Stop(ctx)` — flush everything and reset for reuse.
+
+### Bounding group size
+
+By default a group grows until its match completes, so a malformed or
+never-terminating match could accumulate without bound. Two options cap it
+(both apply to any matcher; `0` means unlimited):
+
+- `WithMaxLines(n)` — keep at most `n` lines per group; further lines are
+  dropped while matching continues normally.
+- `WithMaxBytes(n)` — keep at most `n` bytes per group; the crossing line is
+  truncated on a UTF-8 rune boundary and later lines are dropped.
+
+```go
+ml := multiline.New(emit, multiline.WithMaxLines(500), multiline.WithMaxBytes(64*1024))
+```
+
+## Pattern matching
+
+For simple formats you don't need a full state machine — `NewPattern` aggregates
+using a single regular expression plus a direction, like Beats' pattern-based
+multiline. A line is a *continuation* when it matches `pattern` (set `negate` to
+invert), and `match` controls how continuations attach:
+
+- `multiline.After` — continuation lines are appended to the preceding line; a
+  non-matching line starts a new group. Use for traces with indented frames.
+- `multiline.Before` — lines are buffered until a non-matching line, which ends
+  the group. Use when a line signals that the *next* line continues it.
+
+```go
+// Indented lines continue the entry above them.
+ml, err := multiline.NewPattern("^\\s", false, multiline.After, emit)
+
+// A trailing backslash means the next line is a continuation.
+ml, err := multiline.NewPattern("\\\\$", false, multiline.Before, emit)
+```
+
+Aggregated lines are reported to the emitter with `match` set to `"before"` or
+`"after"`; a standalone line is emitted as-is with `match == ""`.
+
+## Custom matchers
 
 ## Custom matchers
 
@@ -77,7 +118,7 @@ matcher, err := multiline.Compile(states)
 if err != nil {
 	// invalid pattern or a transition to an unknown state
 }
-ml := multiline.NewWithMatcher(matcher, emit)
+ml := multiline.New(emit, multiline.WithMatcher(matcher))
 ```
 
 Notes:

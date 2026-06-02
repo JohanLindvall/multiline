@@ -53,7 +53,7 @@ func mustCompile(stateSets ...[]State) *StateMachine {
 // transition references an unknown state or contains an invalid pattern.
 //
 // Custom matchers are defined exactly like the bundled states_*.go files; pass the
-// resulting state sets to Compile and hand the machine to [NewWithMatcher].
+// resulting state sets to Compile and pass the machine via [WithMatcher].
 func Compile(stateSets ...[]State) (*StateMachine, error) {
 	sm := &StateMachine{
 		names:       []string{"start_state"},

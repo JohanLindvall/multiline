@@ -37,14 +37,14 @@ func main() {
 		panic(err)
 	}
 
-	ml := multiline.NewWithMatcher(matcher, func(_ context.Context, line, match string, _ any) error {
+	ml := multiline.New(func(_ context.Context, line, match string, _ any) error {
 		if match != "" {
 			fmt.Printf("[transaction]\n%s\n\n", line)
 		} else {
 			fmt.Printf("[plain] %s\n", line)
 		}
 		return nil
-	})
+	}, multiline.WithMatcher(matcher))
 
 	log := []string{
 		"listening on :5432",
