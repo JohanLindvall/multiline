@@ -1,0 +1,28 @@
+1,1,1,1,1,1,1,10,1,8,1
+2024-11-19 11:00:00.123 INFO [main] com.example.Application - Starting application
+2024-11-19 11:00:00.234 INFO [main] com.example.Application - Configuration loaded successfully
+2024-11-19 11:00:00.345 INFO [main] com.example.Application - Connecting to database
+2024-11-19 11:00:00.456 DEBUG [main] com.example.db.ConnectionPool - Pool size: 10
+2024-11-19 11:00:00.567 DEBUG [main] com.example.db.ConnectionPool - Active connections: 0
+2024-11-19 11:00:00.678 INFO [main] com.example.Application - Database connection established
+2024-11-19 11:00:01.123 ERROR [worker-1] com.example.service.DataService - Failed to process data
+java.sql.SQLException: Deadlock detected
+	at com.example.db.ConnectionManager.executeQuery(ConnectionManager.java:234)
+	at com.example.repository.DataRepository.findAll(DataRepository.java:56)
+	at com.example.service.DataService.loadData(DataService.java:89)
+	at com.example.service.DataService$$FastClassBySpringCGLIB$$abcd1234.invoke(<generated>)
+	at com.example.worker.WorkerTask.lambda$execute$0(WorkerTask.java:45)
+	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:577)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+2024-11-19 11:00:01.234 WARN [worker-1] com.example.service.DataService - Retrying operation...
+java.lang.IllegalStateException: Transaction already active
+	at com.example.db.TransactionManager.begin(TransactionManager.java:67)
+	at com.example.service.DataService.loadData(DataService.java:82)
+	at com.example.service.DataService$$FastClassBySpringCGLIB$$abcd1234.invoke(<generated>)
+	at com.example.worker.WorkerTask.lambda$execute$0(WorkerTask.java:45)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+2024-11-19 11:00:01.345 INFO [main] com.example.Application - Shutting down gracefully

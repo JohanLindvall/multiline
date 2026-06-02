@@ -1,0 +1,4 @@
+1,1,1
+Unhandled exception. System.NullReferenceException: Object reference not set to an instance of an object.
+Log message from Log helper
+Another log message

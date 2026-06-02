@@ -1,0 +1,26 @@
+25
+Exception in thread "main" java.lang.NullPointerException: Cannot invoke "String.length()" because "input" is null
+    at com.example.utils.StringProcessor.process(StringProcessor.java:42)
+    at com.example.services.UserService.generateUsername(UserService.java:87)
+    at com.example.controllers.UserController.createUser(UserController.java:55)
+    at com.example.controllers.UserController.main(UserController.java:100)
+Caused by: java.lang.IllegalArgumentException: Invalid user data provided
+    at com.example.validation.UserValidator.validate(UserValidator.java:29)
+    at com.example.services.UserService.generateUsername(UserService.java:79)
+    ... 2 more
+Suppressed: java.io.IOException: Failed to close file stream
+    at com.example.utils.FileUtils.closeQuietly(FileUtils.java:67)
+    at com.example.utils.StringProcessor.process(StringProcessor.java:50)
+    ... 3 more
+Caused by: java.nio.file.NoSuchFileException: /var/data/users.tmp
+    at java.base/sun.nio.fs.UnixException.translateToIOException(UnixException.java:92)
+    at java.base/sun.nio.fs.UnixException.rethrowAsIOException(UnixException.java:111)
+    at java.base/sun.nio.fs.UnixException.rethrowAsIOException(UnixException.java:116)
+    at java.base/sun.nio.fs.UnixFileSystemProvider.newByteChannel(UnixFileSystemProvider.java:219)
+    at java.base/java.nio.file.Files.newByteChannel(Files.java:375)
+    at java.base/java.nio.file.Files.newByteChannel(Files.java:426)
+    at java.base/java.nio.file.spi.FileSystemProvider.newInputStream(FileSystemProvider.java:420)
+    at java.base/java.nio.file.Files.newInputStream(Files.java:160)
+    at com.example.utils.FileUtils.readAll(FileUtils.java:25)
+    at com.example.utils.StringProcessor.process(StringProcessor.java:40)
+    ... 4 more

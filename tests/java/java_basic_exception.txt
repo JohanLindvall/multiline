@@ -1,0 +1,12 @@
+11
+java.lang.NullPointerException: Cannot read property 'value' of null object
+	at com.example.service.DataProcessor.processData(DataProcessor.java:45)
+	at com.example.service.DataService.execute(DataService.java:89)
+	at com.example.controller.ApiController.handleRequest(ApiController.java:123)
+	at com.example.controller.ApiController$$FastClassBySpringCGLIB$$1234abcd.invoke(<generated>)
+	at org.springframework.cglib.proxy.MethodProxy.invoke(MethodProxy.java:218)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.invokeJoinpoint(CglibAopProxy.java:793)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
+	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:708)
+	at com.example.controller.ApiController$$EnhancerBySpringCGLIB$$abcd1234.handleRequest(<generated>)
+	at com.example.Main.main(Main.java:50)

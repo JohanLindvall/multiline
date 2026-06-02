@@ -1,0 +1,23 @@
+22
+org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'userService'
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.doCreateBean(AbstractAutowireCapableBeanFactory.java:600)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.createBean(AbstractAutowireCapableBeanFactory.java:522)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.lambda$doGetBean$0(AbstractBeanFactory.java:337)
+	at org.springframework.beans.factory.support.DefaultSingletonBeanRegistry.getSingleton(DefaultSingletonBeanRegistry.java:234)
+	nested exception is: org.springframework.beans.BeanInstantiationException: Failed to instantiate [com.example.service.UserService]
+	at org.springframework.beans.BeanUtils.instantiateClass(BeanUtils.java:211)
+	at org.springframework.beans.factory.support.SimpleInstantiationStrategy.instantiate(SimpleInstantiationStrategy.java:87)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.instantiateBean(AbstractAutowireCapableBeanFactory.java:1335)
+	... 3 more
+	nested exception is: java.lang.IllegalArgumentException: Invalid configuration parameter
+	at com.example.service.UserService.<init>(UserService.java:34)
+	at java.base/jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(DirectConstructorHandleAccessor.java:62)
+	at java.base/java.lang.reflect.Constructor.newInstanceWithCaller(Constructor.java:502)
+	at java.base/java.lang.reflect.Constructor.newInstance(Constructor.java:486)
+	at org.springframework.beans.BeanUtils.instantiateClass(BeanUtils.java:207)
+	... 6 more
+Caused by: org.springframework.dao.DataAccessException: Database configuration error
+	at org.springframework.jdbc.datasource.DriverManagerDataSource.getConnection(DriverManagerDataSource.java:145)
+	at com.example.config.DatabaseConfig.initialize(DatabaseConfig.java:78)
+	at com.example.service.UserService.<init>(UserService.java:28)
+	... 10 more

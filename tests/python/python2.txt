@@ -1,0 +1,12 @@
+11
+Traceback (most recent call last):
+  File "deep_exception.py", line 20, in <module>
+    func1()
+  File "deep_exception.py", line 16, in func1
+    func2()
+  File "deep_exception.py", line 12, in func2
+    func3()
+  File "deep_exception.py", line 8, in func3
+    func4()
+  File "deep_exception.py", line 4, in func4
+    raise RuntimeError("Boom! Deep stack trace triggered.")

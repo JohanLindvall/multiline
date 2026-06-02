@@ -1,0 +1,20 @@
+19
+java.util.concurrent.ExecutionException: Task execution failed
+	at java.base/java.util.concurrent.FutureTask.report(FutureTask.java:122)
+	at java.base/java.util.concurrent.FutureTask.get(FutureTask.java:191)
+	at com.example.worker.WorkerThread.run(WorkerThread.java:67)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.lang.RuntimeException: Processing error in worker thread
+	at com.example.task.DataTask.call(DataTask.java:123)
+	at com.example.task.DataTask.call(DataTask.java:18)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+	... 3 more
+Caused by: java.net.SocketTimeoutException: Read timed out
+	at java.base/java.net.SocketInputStream.socketRead0(Native Method)
+	at java.base/java.net.SocketInputStream.socketRead(SocketInputStream.java:118)
+	at java.base/java.net.SocketInputStream.read(SocketInputStream.java:170)
+	at com.example.network.NetworkClient.readData(NetworkClient.java:234)
+	at com.example.task.DataTask.call(DataTask.java:98)
+	... 5 more

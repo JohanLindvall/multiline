@@ -1,0 +1,12 @@
+11
+Unhandled exception. System.NullReferenceException: Object reference not set to an instance of an object.
+Log message from Log helper
+   at SampleApp.Program.Main(String[] args) in C:\\Projects\\SampleApp\\Program.cs:line 14
+   at System.AppDomain._nExecuteAssembly(RuntimeAssembly assembly, String[] args)
+--- End of stack trace from previous location ---
+   at System.AppDomain.ExecuteAssembly(String assemblyFile, Evidence assemblySecurity, String[] args)
+   at Microsoft.VisualStudio.HostingProcess.HostProc.RunUsersAssembly()
+   at System.Threading.ThreadHelper.ThreadStart_Context(Object state)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state, Boolean preserveSyncCtx)
+   at System.Threading.ExecutionContext.Run(ExecutionContext executionContext, ContextCallback callback, Object state, Boolean preserveSyncCtx)
+   at System.Threading.ThreadHelper.ThreadStart()

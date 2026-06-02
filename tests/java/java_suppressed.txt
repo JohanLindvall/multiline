@@ -1,0 +1,25 @@
+24
+java.io.IOException: Unable to write to file /tmp/data.tmp
+	at java.base/java.io.FileOutputStream.writeBytes(FileOutputStream.java:345)
+	at java.base/java.io.FileOutputStream.write(FileOutputStream.java:290)
+	at java.base/java.io.BufferedOutputStream.flushBuffer(BufferedOutputStream.java:81)
+	at java.base/java.io.BufferedOutputStream.flush(BufferedOutputStream.java:142)
+	at com.example.io.FileWriter.writeData(FileWriter.java:67)
+	at com.example.service.DataExporter.export(DataExporter.java:123)
+	at com.example.service.DataExporter$$FastClassBySpringCGLIB$$abcd1234.invoke(<generated>)
+	at com.example.job.ExportJob.execute(ExportJob.java:45)
+	Suppressed: java.sql.SQLException: Connection already closed
+		at com.zaxxer.hikari.pool.ProxyConnection.close(ProxyConnection.java:267)
+		at com.example.database.TransactionManager.closeConnection(TransactionManager.java:89)
+		at com.example.service.DataExporter.export(DataExporter.java:135)
+		... 1 more
+	Suppressed: java.lang.IllegalStateException: Cache eviction failed
+		at com.example.cache.CacheManager.evict(CacheManager.java:156)
+		at com.example.cache.CacheManager.cleanupOnError(CacheManager.java:234)
+		at com.example.service.DataExporter.export(DataExporter.java:140)
+		... 1 more
+		Suppressed: java.io.IOException: Failed to remove temporary file
+			at java.base/java.nio.file.Files.delete(Files.java:1145)
+			at com.example.cache.CacheManager.deleteTempFiles(CacheManager.java:278)
+			at com.example.cache.CacheManager.evict(CacheManager.java:160)
+			... 3 more

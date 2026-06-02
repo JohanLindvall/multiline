@@ -1,0 +1,17 @@
+16
+org.springframework.web.util.NestedServletException: Request processing failed
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
+	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:909)
+	at javax.servlet.http.HttpServlet.service(HttpServlet.java:665)
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:883)
+	at javax.servlet.http.HttpServlet.service(HttpServlet.java:750)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:231)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:166)
+	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:202)
+Caused by: java.lang.IllegalStateException: Database connection pool exhausted
+	at com.example.database.ConnectionPool.getConnection(ConnectionPool.java:78)
+	at com.example.repository.UserRepository.findById(UserRepository.java:34)
+	at com.example.service.UserService.getUser(UserService.java:56)
+	at com.example.controller.UserController.getUserDetails(UserController.java:89)
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1006)
+	... 8 more

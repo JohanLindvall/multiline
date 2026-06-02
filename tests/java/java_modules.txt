@@ -1,0 +1,16 @@
+15
+java.lang.IllegalAccessError: class com.example.reflection.ReflectionUtil tried to access private method 'void java.lang.System.setOut0(PrintStream)' (com.example.reflection.ReflectionUtil is in module com.example.app; java.lang.System is in module java.base)
+	at com.example.reflection.ReflectionUtil.redirectOutput(ReflectionUtil.java:56)
+	at com.example.app.Application.initialize(Application.java:34)
+	at com.example.app.Application.main(Application.java:12)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.boot.loader.MainMethodRunner.run(MainMethodRunner.java:49)
+	at org.springframework.boot.loader.Launcher.launch(Launcher.java:108)
+Caused by: java.lang.reflect.InaccessibleObjectException: Unable to make field private static final java.io.PrintStream java.lang.System.out accessible: module java.base does not "opens java.lang" to module com.example.app
+	at java.base/java.lang.reflect.AccessibleObject.throwInaccessibleObjectException(AccessibleObject.java:391)
+	at java.base/java.lang.reflect.AccessibleObject.checkCanSetAccessible(AccessibleObject.java:367)
+	at java.base/java.lang.reflect.Field.checkCanSetAccessible(Field.java:183)
+	at java.base/java.lang.reflect.Field.setAccessible(Field.java:177)
+	at com.example.reflection.ReflectionUtil.redirectOutput(ReflectionUtil.java:52)
+	... 6 more
