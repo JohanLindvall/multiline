@@ -1,34 +1,34 @@
 package multiline
 
-var statesNet = []state{
+var statesNet = []State{
 	// .Net
 	{
-		name: "start_state",
-		advance: []advance{
-			{pattern: "^Unhandled exception\\. .+Exception", next: "netstart"},
-			{pattern: "^Unhandled exception\\. .+Exception", next: "netcont"},
+		Name: "start_state",
+		Advance: []Advance{
+			{Pattern: "^Unhandled exception\\. .+Exception", Next: "netstart"},
+			{Pattern: "^Unhandled exception\\. .+Exception", Next: "netcont"},
 		},
 	},
 	{
-		name:        "netstart",
-		nonTerminal: true,
-		advance: []advance{
-			{pattern: ".+", next: "netcont"},
+		Name:        "netstart",
+		NonTerminal: true,
+		Advance: []Advance{
+			{Pattern: ".+", Next: "netcont"},
 		},
 	},
 	{
-		name: "netcont",
-		advance: []advance{
-			{pattern: "^ ---> .+Exception\\b.*:", next: "netcont"},
-			{pattern: "^   at ", next: "netcont"},
-			{pattern: "^--- End of stack trace from previous location ---$", next: "netcont2"},
-			{pattern: "^   --- End of inner exception stack trace ---$", next: "netcont2"},
+		Name: "netcont",
+		Advance: []Advance{
+			{Pattern: "^ ---> .+Exception\\b.*:", Next: "netcont"},
+			{Pattern: "^   at ", Next: "netcont"},
+			{Pattern: "^--- End of stack trace from previous location ---$", Next: "netcont2"},
+			{Pattern: "^   --- End of inner exception stack trace ---$", Next: "netcont2"},
 		},
 	},
 	{
-		name: "netcont2",
-		advance: []advance{
-			{pattern: "^   at ", next: "netcont"},
+		Name: "netcont2",
+		Advance: []Advance{
+			{Pattern: "^   at ", Next: "netcont"},
 		},
 	},
 }

@@ -18,21 +18,31 @@ type stateHolder[T any] struct {
 }
 
 // Multiline aggregates log entries that span several lines into a single line.
-// Lines are grouped by key (see Add) and matched against the configured states;
-// once a complete match terminates, the joined lines are passed to the emitter.
-// Multiline is not safe for concurrent use.
+// Lines are grouped by key (see Add) and matched by a Matcher; once a complete
+// match terminates, the joined lines are passed to the emitter. Multiline is not
+// safe for concurrent use.
 type Multiline[T any] struct {
 	first, last *stateHolder[T]
 	emitter     func(ctx context.Context, line, match string, data T) error
 	states      map[string]*stateHolder[T]
+	matcher     Matcher
 }
 
-// New creates a new multiline aggregator. The emit callback is invoked for every
-// completed line: line is the aggregated text (multiple source lines joined by
-// "\n"), match is the name of the terminating state ("" when the line was emitted
-// as-is), and data is the value associated with the first source line of the group.
+// New creates a new multiline aggregator using the built-in matcher, which
+// recognizes Go, .NET, Python and Java stack traces. The emit callback is invoked
+// for every completed line: line is the aggregated text (multiple source lines
+// joined by "\n"), match is the name of the terminating state ("" when the line was
+// emitted as-is), and data is the value associated with the first source line of
+// the group.
 func New[T any](emit func(ctx context.Context, line, match string, data T) error) *Multiline[T] {
-	return &Multiline[T]{emitter: emit, states: make(map[string]*stateHolder[T])}
+	return NewWithMatcher(defaultMatcher, emit)
+}
+
+// NewWithMatcher creates a new multiline aggregator driven by a custom Matcher,
+// typically a [StateMachine] built from custom states via [Compile]. See New for
+// the emit callback semantics.
+func NewWithMatcher[T any](matcher Matcher, emit func(ctx context.Context, line, match string, data T) error) *Multiline[T] {
+	return &Multiline[T]{emitter: emit, states: make(map[string]*stateHolder[T]), matcher: matcher}
 }
 
 func (m *Multiline[T]) unlink(state *stateHolder[T], inMap bool) {
@@ -94,7 +104,7 @@ func (m *Multiline[T]) Add(ctx context.Context, line, key string, data T) error 
 	var next []int
 	var terminate bool
 	if state != nil {
-		if terminate, next = getNextStates(line, state.nextPos); len(next) == 0 {
+		if terminate, next = m.matcher.NextStates(line, state.nextPos); len(next) == 0 {
 			m.unlink(state, true)
 			if err := m.emit(ctx, state); err != nil {
 				return err
@@ -106,7 +116,7 @@ func (m *Multiline[T]) Add(ctx context.Context, line, key string, data T) error 
 			state.terminate = terminate
 			state.last = state.nextLast
 
-			state.nextLast = names[next[0]]
+			state.nextLast = m.matcher.Name(next[0])
 			state.nextPos = next
 
 			m.moveLast(state)
@@ -114,15 +124,14 @@ func (m *Multiline[T]) Add(ctx context.Context, line, key string, data T) error 
 	}
 
 	if len(next) == 0 {
-		if terminate, next = getNextStates(line, []int{0}); len(next) == 0 {
+		if terminate, next = m.matcher.NextStates(line, []int{0}); len(next) == 0 {
 			// No match for next. Emit line as is
 			return m.emitter(ctx, line, "", data)
-		} else {
-			// Set terminate to false. Can't terminate on first elem
-			nextLast := names[next[0]]
-			state := &stateHolder[T]{nextPos: next, lines: []string{line}, states: []T{data}, key: key, terminate: terminate, nextLast: nextLast, last: names[0]}
-			m.link(state, true)
 		}
+		// Set terminate to false. Can't terminate on first elem
+		nextLast := m.matcher.Name(next[0])
+		state := &stateHolder[T]{nextPos: next, lines: []string{line}, states: []T{data}, key: key, terminate: terminate, nextLast: nextLast, last: m.matcher.Name(0)}
+		m.link(state, true)
 	}
 
 	return nil
@@ -163,11 +172,10 @@ func (m *Multiline[T]) emit(ctx context.Context, state *stateHolder[T]) error {
 	// Cannot end on non-terminal
 	if state.terminate {
 		return m.emitter(ctx, strings.Join(state.lines, "\n"), state.last, state.states[0])
-	} else {
-		for i, line := range state.lines {
-			if err := m.emitter(ctx, line, "", state.states[i]); err != nil {
-				return err
-			}
+	}
+	for i, line := range state.lines {
+		if err := m.emitter(ctx, line, "", state.states[i]); err != nil {
+			return err
 		}
 	}
 

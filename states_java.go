@@ -1,28 +1,28 @@
 package multiline
 
 // https://github.com/fluent/fluent-bit/blob/master/src/multiline/flb_ml_parser_java.c with fixes and enhancements
-var statesJava = []state{
+var statesJava = []State{
 	// Java - Start state: matches exceptions, errors, throwables
 	{
-		name: "start_state,java_start_exception",
-		advance: []advance{
-			{pattern: ".(Exception|Error|Throwable|V8 errors stack trace):", next: "java_after_exception"},
+		Name: "start_state,java_start_exception",
+		Advance: []Advance{
+			{Pattern: ".(Exception|Error|Throwable|V8 errors stack trace):", Next: "java_after_exception"},
 		},
 	},
 	{
-		name:        "java_after_exception",
-		nonTerminal: true,
-		advance: []advance{
-			{pattern: "^[\\t ]*nested exception is:[\\t ]*", next: "java_start_exception"},
+		Name:        "java_after_exception",
+		NonTerminal: true,
+		Advance: []Advance{
+			{Pattern: "^[\\t ]*nested exception is:[\\t ]*", Next: "java_start_exception"},
 		},
 	},
 	{
-		name: "java_after_exception,java",
-		advance: []advance{
-			{pattern: "^[\\t ]+(eval )?at ", next: "java"},
-			{pattern: "^[\\t ]*(Caused by|Suppressed):", next: "java"},
-			{pattern: "^[\\t ]*nested exception is:", next: "java"},
-			{pattern: "^[\\t ]*\\.\\.\\. \\d+ (more|common frames omitted)", next: "java"},
+		Name: "java_after_exception,java",
+		Advance: []Advance{
+			{Pattern: "^[\\t ]+(eval )?at ", Next: "java"},
+			{Pattern: "^[\\t ]*(Caused by|Suppressed):", Next: "java"},
+			{Pattern: "^[\\t ]*nested exception is:", Next: "java"},
+			{Pattern: "^[\\t ]*\\.\\.\\. \\d+ (more|common frames omitted)", Next: "java"},
 		},
 	},
 }

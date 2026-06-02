@@ -1,41 +1,41 @@
 package multiline
 
-var statesGo = []state{
+var statesGo = []State{
 	{
-		name: "start_state",
-		advance: []advance{
-			{pattern: "\\bpanic: ", next: "go_after_panic"},
-			{pattern: "http: panic serving", next: "go_goroutine"},
+		Name: "start_state",
+		Advance: []Advance{
+			{Pattern: "\\bpanic: ", Next: "go_after_panic"},
+			{Pattern: "http: panic serving", Next: "go_goroutine"},
 		},
 	},
 	{
-		name: "go_after_panic",
-		advance: []advance{
-			{pattern: "^\\[signal ", next: "go_after_signal"},
+		Name: "go_after_panic",
+		Advance: []Advance{
+			{Pattern: "^\\[signal ", Next: "go_after_signal"},
 		},
 	},
 	{
-		name: "go_after_signal, go_after_panic, go_frame_1",
-		advance: []advance{
-			{pattern: "^$", next: "go_goroutine"},
+		Name: "go_after_signal, go_after_panic, go_frame_1",
+		Advance: []Advance{
+			{Pattern: "^$", Next: "go_goroutine"},
 		},
 	},
 	{
-		name: "go_goroutine",
-		advance: []advance{
-			{pattern: "^goroutine \\d+ \\[[^\\]]+\\]:$", next: "go_frame_1"},
+		Name: "go_goroutine",
+		Advance: []Advance{
+			{Pattern: "^goroutine \\d+ \\[[^\\]]+\\]:$", Next: "go_frame_1"},
 		},
 	},
 	{
-		name: "go_frame_1",
-		advance: []advance{
-			{pattern: "^(?:[^\\s.:]+\\.)*[^\\s.():]+\\(|^created by ", next: "go_frame_2"},
+		Name: "go_frame_1",
+		Advance: []Advance{
+			{Pattern: "^(?:[^\\s.:]+\\.)*[^\\s.():]+\\(|^created by ", Next: "go_frame_2"},
 		},
 	},
 	{
-		name: "go_frame_2",
-		advance: []advance{
-			{pattern: "^\\s", next: "go_frame_1"},
+		Name: "go_frame_2",
+		Advance: []Advance{
+			{Pattern: "^\\s", Next: "go_frame_1"},
 		},
 	},
 }

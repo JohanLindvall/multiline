@@ -1,4 +1,4 @@
-# multiline
+# Multiline
 
 `multiline` is a small, dependency-free Go library that aggregates log output
 spanning several physical lines — such as panic and exception stack traces —
@@ -43,12 +43,58 @@ don't need one). `Multiline` is not safe for concurrent use.
 
 ### Key methods
 
-- `New[T](emit)` — create an aggregator.
+- `New[T](emit)` — create an aggregator using the built-in matcher.
+- `NewWithMatcher[T](matcher, emit)` — create an aggregator with a custom
+  `Matcher` (see below).
 - `Add(ctx, line, key, data)` — feed one line. An empty `key` bypasses
   aggregation and emits immediately.
 - `FlushBefore(ctx, t)` — emit pending groups last touched before `t` (useful
   for time-based flushing of stale entries).
 - `Stop(ctx)` — flush everything and reset for reuse.
+
+## Custom matchers
+
+Line matching is driven by the `Matcher` interface, so you can recognize your own
+multi-line formats. The simplest way is to declare states — exactly like the
+bundled `states_*.go` files — and compile them:
+
+```go
+states := []multiline.State{
+	{
+		Name:    "start_state", // index 0; every group starts here
+		Advance: []multiline.Advance{{Pattern: "^BEGIN TX", Next: "tx_body"}},
+	},
+	{
+		Name: "tx_body",
+		Advance: []multiline.Advance{
+			{Pattern: "^\\s", Next: "tx_body"},
+			{Pattern: "^(COMMIT|ROLLBACK)", Next: "tx_body"},
+		},
+	},
+}
+
+matcher, err := multiline.Compile(states)
+if err != nil {
+	// invalid pattern or a transition to an unknown state
+}
+ml := multiline.NewWithMatcher(matcher, emit)
+```
+
+Notes:
+
+- The state named `start_state` is the entry point where every group begins.
+- A `State` is *terminal* unless `NonTerminal` is set. A group is emitted as a
+  single aggregated line only when its most recent line was matched from a
+  terminal state — otherwise its lines are flushed individually. Use
+  `NonTerminal` for intermediate states that must not be a valid stopping point.
+- A `State.Name` may list several comma-separated names to share transitions.
+
+For full control you can also implement the `Matcher` interface directly. A
+runnable example lives in [examples/custom](examples/custom/main.go):
+
+```sh
+go run ./examples/custom
+```
 
 ## Example
 
