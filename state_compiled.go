@@ -105,6 +105,10 @@ func splitNames(name string) []string {
 	return parts
 }
 
+// maxNextStates bounds how many distinct states NextStates will track for a single
+// line, guarding against a pathological matcher blowing up the active set.
+const maxNextStates = 20
+
 // NextStates implements [Matcher].
 func (s *StateMachine) NextStates(line string, current []int) (terminal bool, next []int) {
 	for _, state := range current {
@@ -112,6 +116,9 @@ func (s *StateMachine) NextStates(line string, current []int) (terminal bool, ne
 			if adv.pattern.MatchString(line) {
 				if !slices.Contains(next, adv.next) {
 					next = append(next, adv.next)
+					if len(next) > maxNextStates {
+						return
+					}
 				}
 				if !s.nonTerminal[state] {
 					terminal = true
