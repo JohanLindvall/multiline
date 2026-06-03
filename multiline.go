@@ -21,18 +21,16 @@ type stateHolder[T any] struct {
 }
 
 // aggregator decides how successive lines for a given key are grouped. The
-// built-in implementations are the state-machine matcher (nfaAggregator) and the
-// single-pattern before/after matcher (patternAggregator). Implementations build
-// groups with the buffer helpers on Multiline (newGroup, appendLine, link, unlink,
-// moveLast, emit).
+// built-in implementation is the state-machine matcher (nfaAggregator).
+// Implementations build groups with the buffer helpers on Multiline (newGroup,
+// appendLine, link, unlink, moveLast, emit).
 type aggregator[T any] interface {
 	add(m *Multiline[T], ctx context.Context, line, key string, data T) error
 }
 
 // Multiline aggregates log entries that span several lines into a single line.
 // Lines are grouped by key (see Add); once a group completes, the joined lines are
-// passed to the emitter. Grouping is driven either by a Matcher (the default) or by
-// a single before/after pattern (see NewPattern). Multiline is not safe for
+// passed to the emitter. Grouping is driven by a Matcher. Multiline is not safe for
 // concurrent use.
 type Multiline[T any] struct {
 	first, last *stateHolder[T]
@@ -55,8 +53,7 @@ type options struct {
 }
 
 // WithMatcher selects a custom [Matcher] (typically a [StateMachine] built via
-// [Compile]) instead of the built-in one. It has no effect on a pattern-based
-// aggregator (see [NewPattern]).
+// [Compile]) instead of the built-in one.
 func WithMatcher(matcher Matcher) Option {
 	return func(o *options) { o.matcher = matcher }
 }
