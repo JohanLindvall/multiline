@@ -8,13 +8,12 @@ import (
 )
 
 func main() {
-	// The emitter is called once per aggregated entry. multiline joins the
-	// lines of a detected stack trace into a single "line" (separated by "\n").
-	ml := multiline.New(func(_ context.Context, line, match string, _ any) error {
-		if match != "" {
-			fmt.Printf("[stacktrace %s]\n%s\n\n", match, line)
+	// The emitter is called once per completed entry.
+	ml := multiline.New(func(_ context.Context, e multiline.Entry[any]) error {
+		if e.Match != "" {
+			fmt.Printf("[stacktrace %s, %d lines]\n%s\n\n", e.Match, e.Lines, e.Text)
 		} else {
-			fmt.Printf("[plain] %s\n", line)
+			fmt.Printf("[plain] %s\n", e.Text)
 		}
 		return nil
 	})
@@ -33,9 +32,9 @@ func main() {
 	}
 
 	ctx := context.Background()
-	// "key" groups related lines together; use e.g. a container id in real use.
+	// The key groups related lines together; use e.g. a container id in real use.
 	for _, line := range log {
-		if err := ml.Add(ctx, line, "key", any(nil)); err != nil {
+		if err := ml.Add(ctx, "key", line, nil); err != nil {
 			panic(err)
 		}
 	}

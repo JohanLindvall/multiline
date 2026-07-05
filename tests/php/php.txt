@@ -1,0 +1,8 @@
+1,5,1
+starting server
+PHP Fatal error:  Uncaught Exception: Something went wrong in /app/index.php:3
+Stack trace:
+#0 /app/index.php(7): foo()
+#1 {main}
+  thrown in /app/index.php on line 3
+request handled

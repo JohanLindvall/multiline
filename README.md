@@ -9,12 +9,17 @@ single stack trace across many entries. `multiline` recognizes the start and
 continuation patterns of common stack traces and re-joins them, while passing
 ordinary single-line logs straight through untouched.
 
-## Supported stack traces
+## Supported formats
 
 - Go (`panic:` / goroutine dumps)
+- Java / JVM (also matches Node.js stack traces, which share the `at ...` shape)
+- Python (including chained exceptions)
 - .NET
-- Python
-- Java
+- Ruby
+- Rust (panics, with or without backtrace)
+- PHP
+- Kubernetes CRI partial lines (via the [cri](cri) subpackage, see
+  [CRI partial lines](#kubernetes-cri-partial-lines))
 
 ## Install
 
@@ -24,93 +29,24 @@ go get github.com/JohanLindvall/multiline
 
 ## How it works
 
-You create a `Multiline[T]` with an emitter callback. Feed it lines one at a
-time with `Add`. Lines are grouped by a `key` (typically a container or stream
-id) so interleaved streams stay separate. When a multi-line entry completes — or
-you call `FlushBefore` / `Stop` — the emitter is invoked with the aggregated
-text.
+You create an `Aggregator[T]` with an emitter callback and feed it lines one
+at a time with `Add`. Lines are grouped by a key (typically a container or
+stream id) so interleaved streams stay separate. When a multi-line entry
+completes — or you call `Flush`, `FlushBefore` or `Stop` — the emitter
+receives an `Entry`:
 
-The emitter receives:
+| Field       | Meaning |
+| ----------- | ------- |
+| `Text`      | The entry text; aggregated source lines are joined by `"\n"`. |
+| `Key`       | The key the lines were added under. |
+| `Match`     | Name of the format that aggregated the entry (`"go"`, `"java"`, …), or `""` for a line passed through as-is. |
+| `Data`      | The `T` value passed to `Add` with the entry's first source line. |
+| `Lines`     | Number of source lines the entry represents (including lines dropped by the size caps). |
+| `Truncated` | Set when the size caps dropped or cut lines belonging to this entry. |
 
-| Argument | Meaning |
-| -------- | ------- |
-| `line`   | The aggregated text; multiple source lines joined by `"\n"`. |
-| `match`  | Name of the terminating state, or `""` when the line was emitted as-is. |
-| `data`   | The `T` value associated with the first source line of the group. |
-
-`T` is a generic payload you attach to each line (use `any` or `struct{}` if you
-don't need one). `Multiline` is not safe for concurrent use.
-
-### Key methods
-
-- `New[T](emit, opts...)` — create an aggregator. Defaults to the built-in
-  matcher; pass `WithMatcher(m)` for a custom `Matcher` (see below).
-- `Add(ctx, line, key, data)` — feed one line. An empty `key` bypasses
-  aggregation and emits immediately.
-- `FlushBefore(ctx, t)` — emit pending groups last touched before `t` (useful
-  for time-based flushing of stale entries).
-- `Stop(ctx)` — flush everything and reset for reuse.
-
-### Bounding group size
-
-By default a group grows until its match completes, so a malformed or
-never-terminating match could accumulate without bound. Two options cap it
-(both apply to any matcher; `0` means unlimited):
-
-- `WithMaxLines(n)` — keep at most `n` lines per group; further lines are
-  dropped while matching continues normally.
-- `WithMaxBytes(n)` — keep at most `n` bytes per group; the crossing line is
-  truncated on a UTF-8 rune boundary and later lines are dropped.
-
-```go
-ml := multiline.New(emit, multiline.WithMaxLines(500), multiline.WithMaxBytes(64*1024))
-```
-
-## Custom matchers
-
-Line matching is driven by the `Matcher` interface, so you can recognize your own
-multi-line formats. The simplest way is to declare states — exactly like the
-bundled `states_*.go` files — and compile them:
-
-```go
-states := []multiline.State{
-	{
-		Name:    "start_state", // index 0; every group starts here
-		Advance: []multiline.Advance{{Pattern: "^BEGIN TX", Next: "tx_body"}},
-	},
-	{
-		Name: "tx_body",
-		Advance: []multiline.Advance{
-			{Pattern: "^\\s", Next: "tx_body"},
-			{Pattern: "^(COMMIT|ROLLBACK)", Next: "tx_body"},
-		},
-	},
-}
-
-matcher, err := multiline.Compile(states)
-if err != nil {
-	// invalid pattern or a transition to an unknown state
-}
-ml := multiline.New(emit, multiline.WithMatcher(matcher))
-```
-
-Notes:
-
-- The state named `start_state` is the entry point where every group begins.
-- A `State` is *terminal* unless `NonTerminal` is set. A group is emitted as a
-  single aggregated line only when its most recent line was matched from a
-  terminal state — otherwise its lines are flushed individually. Use
-  `NonTerminal` for intermediate states that must not be a valid stopping point.
-- A `State.Name` may list several comma-separated names to share transitions.
-
-For full control you can also implement the `Matcher` interface directly. A
-runnable example lives in [examples/custom](examples/custom/main.go):
-
-```sh
-go run ./examples/custom
-```
-
-## Example
+`T` is a generic payload you attach to each line — a log timestamp, a file
+offset for checkpointing, or `struct{}` if you don't need one. An
+`Aggregator` is not safe for concurrent use.
 
 ```go
 package main
@@ -123,63 +59,162 @@ import (
 )
 
 func main() {
-	// The emitter is called once per aggregated entry.
-	ml := multiline.New(func(_ context.Context, line, match string, _ any) error {
-		if match != "" {
-			fmt.Printf("[stacktrace %s]\n%s\n\n", match, line)
+	ml := multiline.New(func(_ context.Context, e multiline.Entry[any]) error {
+		if e.Match != "" {
+			fmt.Printf("[stacktrace %s]\n%s\n\n", e.Match, e.Text)
 		} else {
-			fmt.Printf("[plain] %s\n", line)
+			fmt.Printf("[plain] %s\n", e.Text)
 		}
 		return nil
 	})
 
-	log := []string{
+	ctx := context.Background()
+	for _, line := range []string{
 		"server started",
 		"panic: runtime error: invalid memory address or nil pointer dereference",
-		"[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x123456]",
 		"",
 		"goroutine 1 [running]:",
 		"main.handler(0x0)",
 		"\t/app/main.go:42 +0x1d",
-		"main.main()",
-		"\t/app/main.go:17 +0x2b",
 		"shutting down",
-	}
-
-	ctx := context.Background()
-	// "key" groups related lines together; use e.g. a container id in real use.
-	for _, line := range log {
-		if err := ml.Add(ctx, line, "key", any(nil)); err != nil {
+	} {
+		if err := ml.Add(ctx, "key", line, nil); err != nil {
 			panic(err)
 		}
 	}
-
-	// Flush anything still buffered.
 	if err := ml.Stop(ctx); err != nil {
 		panic(err)
 	}
 }
 ```
 
-Output:
+The runnable version lives in [examples/simple](examples/simple/main.go)
+(`go run ./examples/simple`).
 
+### Methods
+
+- `New[T](emit, opts...)` — create an aggregator. Defaults to the built-in
+  matcher covering `patterns.All`; pass `WithMatcher` to change it.
+- `Add(ctx, key, line, data)` — feed one line, stamped with the current time.
+  An empty key bypasses aggregation and emits immediately.
+- `AddAt(ctx, key, line, when, data)` — like `Add` with an explicit time.
+  Pass the log's own timestamp to make `FlushBefore` robust when replaying
+  old logs.
+- `Flush(ctx, key)` — emit the pending group for one key. Call it when a
+  stream ends, e.g. when its container terminates.
+- `FlushBefore(ctx, t)` — emit pending groups last touched before `t`.
+- `Stop(ctx)` — flush everything (oldest first) and reset for reuse.
+
+### Buffering latency
+
+A line that matches any start pattern is buffered until the next line for its
+key arrives, so the last entry of an idle stream stays pending. Every real
+deployment should flush stale groups periodically:
+
+```go
+ticker := time.NewTicker(time.Second)
+defer ticker.Stop()
+for range ticker.C {
+	if err := ml.FlushBefore(ctx, time.Now().Add(-5*time.Second)); err != nil {
+		...
+	}
+}
 ```
-[plain] server started
-[stacktrace go_frame_2]
-panic: runtime error: invalid memory address or nil pointer dereference
-[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x123456]
 
-goroutine 1 [running]:
-main.handler(0x0)
-	/app/main.go:42 +0x1d
-main.main()
-	/app/main.go:17 +0x2b
+### Bounding memory
 
-[plain] shutting down
+By default a group grows until its match completes. Three options bound the
+aggregator; entries that lost lines to a cap are flagged `Truncated`
+(`0` means unlimited):
+
+- `WithMaxLines(n)` — retain at most `n` lines per group; further lines are
+  dropped while matching continues normally.
+- `WithMaxBytes(n)` — retain at most `n` text bytes per group; the crossing
+  line is cut on a UTF-8 rune boundary and later lines are dropped.
+- `WithMaxGroups(n)` — track at most `n` keys with pending lines; beyond it
+  the least recently touched group is flushed. This guards against key
+  cardinality explosions.
+
+```go
+ml := multiline.New(emit,
+	multiline.WithMaxLines(500),
+	multiline.WithMaxBytes(64*1024),
+	multiline.WithMaxGroups(10_000))
 ```
 
-The runnable version lives in [examples/simple](examples/simple/main.go):
+## Custom formats
 
-```sh
-go run ./examples/simple
+Matching is driven by declarative state machines in the
+[patterns](patterns) subpackage. The bundled definitions are exported
+(`patterns.Go`, `patterns.Java`, `patterns.Python`, `patterns.DotNet`,
+`patterns.Ruby`, `patterns.Rust`, `patterns.PHP`, collected in
+`patterns.All`), so you can compile a subset, or add your own set alongside
+them — its `Name` is what completed entries report as `Match`:
+
+```go
+set := patterns.StateSet{Name: "tx", States: []patterns.State{
+	{Name: patterns.StartState, Transitions: []patterns.Transition{
+		{Pattern: `^BEGIN TX`, Next: "body"},
+	}},
+	{Name: "body", Transitions: []patterns.Transition{
+		{Pattern: `^\s`, Next: "body"},
+		{Pattern: `^(COMMIT|ROLLBACK)`, Next: "body"},
+	}},
+}}
+
+matcher, err := patterns.Compile(append(patterns.All, set)...)
+if err != nil {
+	// invalid pattern, unknown state reference, ...
+}
+ml := multiline.New(emit, multiline.WithMatcher(matcher))
 ```
+
+Notes:
+
+- Every group begins at `patterns.StartState`; each set's transitions on it
+  are merged into the shared start state, while all other state names are
+  private to their set.
+- A state is *accepting* unless `NonTerminal` is set. A group completes at
+  the most recent line that landed in an accepting state; when it is flushed,
+  those lines are emitted as one aggregated entry and any lines consumed
+  after them are re-emitted individually. An aggregated entry always spans at
+  least two source lines. Use `NonTerminal` for intermediate states that are
+  not a valid stopping point.
+- For full control you can implement the `multiline.Matcher` interface
+  directly instead of compiling state sets.
+
+A runnable example lives in [examples/custom](examples/custom/main.go)
+(`go run ./examples/custom`).
+
+## Kubernetes CRI partial lines
+
+Container runtimes (containerd, CRI-O) write logs in the CRI format
+(`<timestamp> <stream> P|F <content>`) and split long application lines into
+`P` (partial) fragments closed by an `F` (full) line. Those fragments must be
+rejoined **before** stack-trace aggregation, and the fragments of one line
+are concatenated without a separator — so this is a separate stage, provided
+by the [cri](cri) subpackage:
+
+```go
+// Stack-trace aggregation over the rejoined lines...
+traces := multiline.New(emitEntries)
+
+// ...with CRI rejoining in front of it. Fragment runs are buffered per key
+// and stream; rejoined lines reach the next stage with prefixes stripped,
+// keyed "<key>/<stream>", stamped with their log timestamps.
+logs := cri.New(traces.AddAt)
+
+err := logs.Add(ctx, containerID, rawLine, data)
+```
+
+`cri.New` accepts the same `WithMaxLines` / `WithMaxBytes` / `WithMaxGroups`
+options to bound fragment buffering, and has its own `Flush`, `FlushBefore`
+and `Stop` (stop the upstream stage first). Lines that are not CRI-formatted
+pass through unmodified, and `cri.Parse` is exported for callers that need
+the pieces. A runnable pipeline lives in
+[examples/cri](examples/cri/main.go) (`go run ./examples/cri`). Docker's
+json-file driver is a different format and needs JSON unwrapping instead.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

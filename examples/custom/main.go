@@ -5,43 +5,45 @@ import (
 	"fmt"
 
 	"github.com/JohanLindvall/multiline"
+	"github.com/JohanLindvall/multiline/patterns"
 )
 
-// myStates defines a tiny custom matcher, exactly like the bundled states_*.go
-// files. It groups a "BEGIN TX" line with the indented body lines that follow and
-// the terminating COMMIT/ROLLBACK.
+// txSet defines a tiny custom format, exactly like the bundled sets in the
+// patterns package. It groups a "BEGIN TX" line with the indented body lines
+// that follow and the terminating COMMIT/ROLLBACK.
 //
-// A group is emitted as a single aggregated line only when its most recent line
-// was matched from a *terminal* state, so the body/commit lines live in a terminal
-// state while "start_state" stays non-terminal (a lone "BEGIN TX" should not
-// aggregate on its own).
-var myStates = []multiline.State{
+// A group completes only on lines that land in an accepting state, so "body"
+// is accepting while the start state never is (a lone "BEGIN TX" line should
+// not aggregate on its own).
+var txSet = patterns.StateSet{Name: "tx", States: []patterns.State{
 	{
-		Name: "start_state",
-		Advance: []multiline.Advance{
-			{Pattern: "^BEGIN TX", Next: "tx_body"},
+		Name: patterns.StartState,
+		Transitions: []patterns.Transition{
+			{Pattern: `^BEGIN TX`, Next: "body"},
 		},
 	},
 	{
-		Name: "tx_body",
-		Advance: []multiline.Advance{
-			{Pattern: "^\\s", Next: "tx_body"},
-			{Pattern: "^(COMMIT|ROLLBACK)", Next: "tx_body"},
+		Name: "body",
+		Transitions: []patterns.Transition{
+			{Pattern: `^\s`, Next: "body"},
+			{Pattern: `^(COMMIT|ROLLBACK)`, Next: "body"},
 		},
 	},
-}
+}}
 
 func main() {
-	matcher, err := multiline.Compile(myStates)
+	// Compile the custom set alongside the bundled ones; compile only txSet
+	// to recognize nothing else.
+	matcher, err := patterns.Compile(append(patterns.All, txSet)...)
 	if err != nil {
 		panic(err)
 	}
 
-	ml := multiline.New(func(_ context.Context, line, match string, _ any) error {
-		if match != "" {
-			fmt.Printf("[transaction]\n%s\n\n", line)
+	ml := multiline.New(func(_ context.Context, e multiline.Entry[any]) error {
+		if e.Match != "" {
+			fmt.Printf("[%s]\n%s\n\n", e.Match, e.Text)
 		} else {
-			fmt.Printf("[plain] %s\n", line)
+			fmt.Printf("[plain] %s\n", e.Text)
 		}
 		return nil
 	}, multiline.WithMatcher(matcher))
@@ -57,7 +59,7 @@ func main() {
 
 	ctx := context.Background()
 	for _, line := range log {
-		if err := ml.Add(ctx, line, "session-1", any(nil)); err != nil {
+		if err := ml.Add(ctx, "session-1", line, nil); err != nil {
 			panic(err)
 		}
 	}

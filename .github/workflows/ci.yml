@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ['**'] # every branch; tag pushes don't trigger (so the tags this
+    # workflow creates don't re-run CI)
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Run lint + tests on both architectures before the tag job below publishes a
+  # release tag.
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Prebuilt binary (no source compile) + cached binary and lint cache. Lint is
+      # architecture-independent (it analyzes source, not the built binary), so run
+      # it once on amd64 only; both arches still run the tests.
+      - name: Lint
+        if: matrix.arch == 'amd64'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - name: Test
+        run: make test
+
+  # On a green main build, bump the patch of the latest vX.Y.Z tag (the Go module
+  # version convention). Patch only: a major bump would require a /vN module path,
+  # and minor releases are deliberate, so make those by pushing the tag by hand.
+  tag:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the new tag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # need full history and existing tags
+      - name: Bump patch version tag
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --tags --force
+          if tag=$(git describe --tags --exact-match 2>/dev/null); then
+            echo "HEAD is already tagged ($tag); nothing to do."
+            exit 0
+          fi
+          latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1)
+          if [ -z "$latest" ]; then
+            next='v0.0.1'
+          else
+            v=${latest#v}
+            IFS=. read -r major minor patch <<<"$v"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "Tagging $next (previous: ${latest:-none})"
+          git tag -a "$next" -m "$next"
+          git push origin "$next"

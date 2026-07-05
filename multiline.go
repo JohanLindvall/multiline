@@ -1,3 +1,11 @@
+// Package multiline aggregates log output spanning several physical lines —
+// such as panic and exception stack traces — back into a single logical
+// entry. Lines are fed one at a time to an [Aggregator], grouped per key, and
+// completed entries are handed to an [Emitter] callback.
+//
+// The bundled matcher recognizes Go, Java (and Node.js), Python, .NET, Ruby,
+// Rust and PHP stack traces; custom formats are declared in the patterns
+// subpackage and selected with [WithMatcher].
 package multiline
 
 import (
@@ -5,224 +13,338 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/JohanLindvall/multiline/patterns"
 )
 
-type stateHolder[T any] struct {
-	prev, next     *stateHolder[T]
-	key            string
-	when           time.Time
-	states         []T
-	lines          []string
-	bytes          int
-	capped         bool
-	nextPos        []int
-	terminate      bool
-	last, nextLast string
+// Entry is one completed log entry handed to the [Emitter].
+type Entry[T any] struct {
+	// Text is the entry text; for an aggregated entry the source lines are
+	// joined by "\n".
+	Text string
+	// Key is the key the entry's lines were added under. It allows chaining
+	// aggregation stages: an emitter can feed another Aggregator keyed by
+	// entry.Key (see examples/cri).
+	Key string
+	// Match names the format that aggregated this entry (a patterns.StateSet
+	// name such as "go" or "java"). It is "" when the line passed through
+	// as-is.
+	Match string
+	// Data is the value passed to Add for the entry's first source line.
+	Data T
+	// Lines is the number of source lines the entry represents. It counts
+	// lines dropped by WithMaxLines/WithMaxBytes, so it can exceed the number
+	// of lines in Text.
+	Lines int
+	// Truncated is set when lines belonging to this entry were dropped or cut
+	// by WithMaxLines/WithMaxBytes.
+	Truncated bool
 }
 
-// aggregator decides how successive lines for a given key are grouped. The
-// built-in implementation is the state-machine matcher (nfaAggregator).
-// Implementations build groups with the buffer helpers on Multiline (newGroup,
-// appendLine, link, unlink, moveLast, emit).
-type aggregator[T any] interface {
-	add(m *Multiline[T], ctx context.Context, line, key string, data T) error
+// Emitter receives completed entries. Returning an error aborts the Add or
+// flush call that produced the entry; lines already buffered in the same
+// group are not re-delivered.
+type Emitter[T any] func(ctx context.Context, entry Entry[T]) error
+
+// Matcher decides how successive lines are grouped. Implementations track
+// matcher state as opaque int indices, where index 0 is the start state a new
+// group begins from. The built-in implementation is [patterns.StateMachine];
+// implementations must be immutable or otherwise safe for the
+// (single-threaded) use an Aggregator makes of them.
+type Matcher interface {
+	// Step applies line to the active states and returns the new active set,
+	// plus the index of an accepting state the line landed in (-1 if none).
+	// An empty next means line does not continue any active state. Step must
+	// not retain or modify the active slice.
+	Step(line string, active []int) (next []int, accepted int)
+	// Format returns the format name reported as [Entry].Match for a group
+	// that completed in the state at index.
+	Format(index int) string
 }
 
-// Multiline aggregates log entries that span several lines into a single line.
-// Lines are grouped by key (see Add); once a group completes, the joined lines are
-// passed to the emitter. Grouping is driven by a Matcher. Multiline is not safe for
-// concurrent use.
-type Multiline[T any] struct {
-	first, last *stateHolder[T]
-	emitter     func(ctx context.Context, line, match string, data T) error
-	states      map[string]*stateHolder[T]
-	agg         aggregator[T]
+// defaultMatcher recognizes the stack-trace formats bundled in the patterns
+// subpackage.
+var defaultMatcher Matcher = patterns.MustCompile(patterns.All...)
 
-	// maxLines / maxBytes bound the size of a single group; 0 means unlimited.
-	maxLines int
-	maxBytes int
+// startStates is the active set a new group is matched from.
+var startStates = []int{0}
+
+// group buffers the pending lines of one key.
+type group[T any] struct {
+	prev, next *group[T]
+	key        string
+	when       time.Time
+
+	lines  []string
+	data   []T
+	bytes  int
+	total  int // lines consumed, including ones dropped by the caps
+	capped bool
+
+	active []int // matcher states after the last consumed line
+
+	// Longest accepted prefix: the group completed most recently at retained
+	// line index acceptedLines (consumed line acceptedTotal) in format match.
+	// acceptedLines == 0 means the group never completed.
+	match         string
+	acceptedLines int
+	acceptedTotal int
 }
 
-// Option configures a Multiline at construction time.
-type Option func(*options)
+// Aggregator joins log entries that span several lines into a single entry.
+// Lines are grouped per key (see [Aggregator.Add]); when a group completes,
+// the joined lines are passed to the emitter. Grouping is driven by a
+// [Matcher]. An Aggregator is not safe for concurrent use.
+type Aggregator[T any] struct {
+	emit    Emitter[T]
+	matcher Matcher
+	now     func() time.Time
 
-type options struct {
-	maxLines int
-	maxBytes int
-	matcher  Matcher
+	groups      map[string]*group[T]
+	first, last *group[T] // groups in last-touched order
+
+	maxLines  int
+	maxBytes  int
+	maxGroups int
 }
 
-// WithMatcher selects a custom [Matcher] (typically a [StateMachine] built via
-// [Compile]) instead of the built-in one.
+// Option configures an [Aggregator] at construction time.
+type Option func(*config)
+
+type config struct {
+	matcher   Matcher
+	now       func() time.Time
+	maxLines  int
+	maxBytes  int
+	maxGroups int
+}
+
+// WithMatcher selects a custom [Matcher] (typically a [patterns.StateMachine]
+// built via [patterns.Compile]) instead of the built-in one.
 func WithMatcher(matcher Matcher) Option {
-	return func(o *options) { o.matcher = matcher }
+	return func(c *config) { c.matcher = matcher }
 }
 
-// WithMaxLines caps the number of lines retained in a single aggregated group.
-// Once the cap is reached further lines are dropped (the group's boundary is still
-// detected normally, so matching continues). A value <= 0 means unlimited. This
-// guards against an unterminated match growing without bound.
+// WithMaxLines caps the number of lines retained in a single group. Further
+// lines are dropped while matching continues normally, and the resulting
+// entry is flagged Truncated. A value <= 0 means unlimited. This guards
+// against an unterminated match growing without bound.
 func WithMaxLines(n int) Option {
-	return func(o *options) { o.maxLines = n }
+	return func(c *config) { c.maxLines = n }
 }
 
-// WithMaxBytes caps the total bytes retained in a single aggregated group. The line
-// that crosses the limit is truncated (on a UTF-8 rune boundary) and subsequent
-// lines are dropped. A value <= 0 means unlimited.
+// WithMaxBytes caps the total text bytes retained in a single group. The line
+// that crosses the limit is cut on a UTF-8 rune boundary, subsequent lines
+// are dropped, and the resulting entry is flagged Truncated. A value <= 0
+// means unlimited.
 func WithMaxBytes(n int) Option {
-	return func(o *options) { o.maxBytes = n }
+	return func(c *config) { c.maxBytes = n }
 }
 
-func newMultiline[T any](emit func(ctx context.Context, line, match string, data T) error, opts ...Option) (*Multiline[T], options) {
-	var o options
+// WithMaxGroups caps the number of keys with pending lines. Adding a line for
+// a new key beyond the cap flushes the least recently touched group first. A
+// value <= 0 means unlimited. This guards against unbounded key cardinality;
+// time-based flushing is [Aggregator.FlushBefore].
+func WithMaxGroups(n int) Option {
+	return func(c *config) { c.maxGroups = n }
+}
+
+// WithClock replaces time.Now as the source of the arrival times that
+// [Aggregator.Add] stamps groups with (used by FlushBefore). Prefer
+// [Aggregator.AddAt] to supply per-line times, e.g. log timestamps.
+func WithClock(now func() time.Time) Option {
+	return func(c *config) { c.now = now }
+}
+
+// New creates an aggregator that hands completed entries to emit. By default
+// it recognizes the stack-trace formats in [patterns.All]; pass [WithMatcher]
+// to change that.
+func New[T any](emit Emitter[T], opts ...Option) *Aggregator[T] {
+	c := config{matcher: defaultMatcher, now: time.Now}
 	for _, opt := range opts {
-		opt(&o)
+		opt(&c)
 	}
-	m := &Multiline[T]{
-		emitter:  emit,
-		states:   make(map[string]*stateHolder[T]),
-		maxLines: o.maxLines,
-		maxBytes: o.maxBytes,
-	}
-	return m, o
-}
-
-// New creates a new multiline aggregator. By default it uses the built-in matcher,
-// which recognizes Go, .NET, Python and Java stack traces; pass [WithMatcher] to
-// supply a custom [Matcher]. The emit callback is invoked for every completed line:
-// line is the aggregated text (multiple source lines joined by "\n"), match is the
-// name of the terminating state ("" when the line was emitted as-is), and data is
-// the value associated with the first source line of the group.
-func New[T any](emit func(ctx context.Context, line, match string, data T) error, opts ...Option) *Multiline[T] {
-	m, o := newMultiline(emit, opts...)
-	matcher := o.matcher
-	if matcher == nil {
-		matcher = defaultMatcher
-	}
-	m.agg = &nfaAggregator[T]{matcher: matcher}
-	return m
-}
-
-func (m *Multiline[T]) unlink(state *stateHolder[T], inMap bool) {
-	if m.first == state {
-		m.first = state.next
-	}
-	if m.last == state {
-		m.last = state.prev
-	}
-	if state.prev != nil {
-		state.prev.next = state.next
-	}
-	if state.next != nil {
-		state.next.prev = state.prev
-	}
-	state.prev = nil
-	state.next = nil
-
-	if inMap {
-		delete(m.states, state.key)
+	return &Aggregator[T]{
+		emit:      emit,
+		matcher:   c.matcher,
+		now:       c.now,
+		groups:    make(map[string]*group[T]),
+		maxLines:  c.maxLines,
+		maxBytes:  c.maxBytes,
+		maxGroups: c.maxGroups,
 	}
 }
 
-func (m *Multiline[T]) link(state *stateHolder[T], inMap bool) {
-	state.prev = m.last
-	state.next = nil
-	if m.first == nil {
-		m.first = state
-	}
-	if m.last != nil {
-		m.last.next = state
-	}
-	m.last = state
-	if inMap {
-		m.states[state.key] = state
-	}
-	state.when = time.Now()
+// Add feeds a single line into the aggregator, stamped with the current time.
+// The key groups related lines and is typically a container or stream id; an
+// empty key bypasses aggregation and emits the line immediately. data rides
+// along with the line and is handed back through the emitter. Add returns the
+// first error produced by the emitter, if any.
+func (a *Aggregator[T]) Add(ctx context.Context, key, line string, data T) error {
+	return a.AddAt(ctx, key, line, a.now(), data)
 }
 
-func (m *Multiline[T]) moveLast(state *stateHolder[T]) {
-	if state != m.last {
-		m.unlink(state, false)
-		m.link(state, false)
+// AddAt is [Aggregator.Add] with an explicit arrival time, which
+// [Aggregator.FlushBefore] compares against — pass the log's own timestamp to
+// make time-based flushing robust when replaying old logs. Times are assumed
+// to be non-decreasing across calls.
+func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.Time, data T) error {
+	if key == "" {
+		return a.emit(ctx, Entry[T]{Text: line, Lines: 1, Data: data})
 	}
+
+	if g := a.groups[key]; g != nil {
+		if next, accepted := a.matcher.Step(line, g.active); len(next) > 0 {
+			a.append(g, line, data)
+			g.active = next
+			if accepted >= 0 {
+				g.match = a.matcher.Format(accepted)
+				g.acceptedLines = len(g.lines)
+				g.acceptedTotal = g.total
+			}
+			g.when = when
+			a.moveLast(g)
+			return nil
+		}
+		// The line does not continue the group: flush it, then let the line
+		// start a new group or pass through below.
+		a.unlink(g)
+		if err := a.flush(ctx, g); err != nil {
+			return err
+		}
+	}
+
+	next, _ := a.matcher.Step(line, startStates)
+	if len(next) == 0 {
+		return a.emit(ctx, Entry[T]{Text: line, Key: key, Lines: 1, Data: data})
+	}
+
+	// The accepted result is deliberately ignored here: an aggregated entry
+	// must span at least two source lines.
+	g := &group[T]{key: key, when: when, active: next}
+	a.append(g, line, data)
+	a.groups[key] = g
+	a.link(g)
+
+	for a.maxGroups > 0 && len(a.groups) > a.maxGroups {
+		oldest := a.first
+		a.unlink(oldest)
+		if err := a.flush(ctx, oldest); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-// newGroup returns an empty group for key. Use appendLine to add its lines.
-func (m *Multiline[T]) newGroup(key string) *stateHolder[T] {
-	return &stateHolder[T]{key: key}
+// Flush emits the pending group for key, if any. Use it when a stream ends,
+// for example when its container terminates.
+func (a *Aggregator[T]) Flush(ctx context.Context, key string) error {
+	g := a.groups[key]
+	if g == nil {
+		return nil
+	}
+	a.unlink(g)
+	return a.flush(ctx, g)
 }
 
-// appendLine stores line (and its data) in state, honoring the maxLines/maxBytes
-// caps. Once a cap is hit the line is dropped or truncated and state.capped is set,
-// so callers may keep advancing their matching state without growing the buffer.
-func (m *Multiline[T]) appendLine(state *stateHolder[T], line string, data T) {
-	if state.capped {
+// FlushBefore emits every pending group last touched before t, freeing groups
+// that have gone stale. Call it periodically, e.g. from a ticker:
+//
+//	ml.FlushBefore(ctx, time.Now().Add(-5*time.Second))
+//
+// Groups are kept in last-touched order, so flushing stops at the first group
+// touched at or after t. It returns the first error produced while emitting.
+func (a *Aggregator[T]) FlushBefore(ctx context.Context, t time.Time) error {
+	for g := a.first; g != nil && g.when.Before(t); g = a.first {
+		a.unlink(g)
+		if err := a.flush(ctx, g); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Stop flushes every pending group, oldest first, leaving the aggregator
+// empty and reusable. It returns the first error produced while emitting;
+// groups emitted before the error are not re-delivered by a retry.
+func (a *Aggregator[T]) Stop(ctx context.Context) error {
+	for g := a.first; g != nil; g = a.first {
+		a.unlink(g)
+		if err := a.flush(ctx, g); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// append stores line (and its data) in g, honoring the maxLines/maxBytes
+// caps. Once a cap is hit the line is cut or dropped and g.capped is set;
+// matching still advances, so the group's boundary is detected normally. The
+// first line of a group is always retained (possibly cut to ""), so a group
+// is never empty.
+func (a *Aggregator[T]) append(g *group[T], line string, data T) {
+	g.total++
+	if g.capped {
 		return
 	}
-	if m.maxLines > 0 && len(state.lines) >= m.maxLines {
-		state.capped = true
+	if a.maxLines > 0 && len(g.lines) >= a.maxLines {
+		g.capped = true
 		return
 	}
 
 	sep := 0
-	if len(state.lines) > 0 {
+	if len(g.lines) > 0 {
 		sep = 1 // lines are joined by a single "\n" on emit
 	}
-
-	if m.maxBytes > 0 && state.bytes+sep+len(line) > m.maxBytes {
-		avail := m.maxBytes - state.bytes - sep
-		// Back off to a rune boundary so truncation never yields invalid UTF-8.
+	if a.maxBytes > 0 && g.bytes+sep+len(line) > a.maxBytes {
+		avail := a.maxBytes - g.bytes - sep
+		// Back off to a rune boundary so a cut never yields invalid UTF-8.
 		for avail > 0 && !utf8.RuneStart(line[avail]) {
 			avail--
 		}
-		state.capped = true
+		g.capped = true
 		if avail <= 0 {
-			return
+			if len(g.lines) > 0 {
+				return
+			}
+			avail = 0
 		}
 		line = line[:avail]
 	}
 
-	state.lines = append(state.lines, line)
-	state.states = append(state.states, data)
-	state.bytes += sep + len(line)
+	g.lines = append(g.lines, line)
+	g.data = append(g.data, data)
+	g.bytes += sep + len(line)
 }
 
-// Add feeds a single line into the aggregator. The key groups related lines and is
-// typically the container id; an empty key bypasses aggregation and emits the line
-// immediately. data is carried alongside the line and handed back through the
-// emitter. Add returns the first error produced by the emitter, if any.
-func (m *Multiline[T]) Add(ctx context.Context, line, key string, data T) error {
-	if key == "" {
-		// No key. Emit line as is
-		return m.emitter(ctx, line, "", data)
-	}
-	return m.agg.add(m, ctx, line, key, data)
-}
-
-// Stop flushes every pending group through the emitter and resets the aggregator
-// to its empty state, so it may be reused afterwards. It returns the first error
-// produced while emitting, if any.
-func (m *Multiline[T]) Stop(ctx context.Context) error {
-	for _, state := range m.states {
-		if err := m.emit(ctx, state); err != nil {
+// flush emits g's longest accepted prefix as one aggregated entry and any
+// retained lines after it individually. A group that never completed has all
+// its lines emitted individually.
+func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
+	tail := 0
+	if k := g.acceptedLines; k > 0 {
+		tail = k
+		if err := a.emit(ctx, Entry[T]{
+			Text:      strings.Join(g.lines[:k], "\n"),
+			Key:       g.key,
+			Match:     g.match,
+			Data:      g.data[0],
+			Lines:     g.acceptedTotal,
+			Truncated: g.capped,
+		}); err != nil {
 			return err
 		}
 	}
 
-	clear(m.states)
-	m.first = nil
-	m.last = nil
-	return nil
-}
-
-// FlushBefore emits every pending group whose most recent line arrived before t,
-// freeing groups that have gone stale. Groups are tracked in arrival order, so
-// flushing stops at the first group last touched at or after t. It returns the
-// first error produced while emitting, if any.
-func (m *Multiline[T]) FlushBefore(ctx context.Context, t time.Time) error {
-	for state := m.first; state != nil && state.when.Before(t); state = m.first {
-		m.unlink(state, true)
-		if err := m.emit(ctx, state); err != nil {
+	for i := tail; i < len(g.lines); i++ {
+		e := Entry[T]{Text: g.lines[i], Key: g.key, Lines: 1, Data: g.data[i]}
+		if tail == 0 && g.capped && i == len(g.lines)-1 {
+			e.Truncated = true
+		}
+		if err := a.emit(ctx, e); err != nil {
 			return err
 		}
 	}
@@ -230,67 +352,51 @@ func (m *Multiline[T]) FlushBefore(ctx context.Context, t time.Time) error {
 	return nil
 }
 
-// emit hands state to the emitter. A group flagged terminate is emitted as one
-// joined line tagged with state.last; otherwise each buffered line is emitted
-// individually as an as-is line.
-func (m *Multiline[T]) emit(ctx context.Context, state *stateHolder[T]) error {
-	if state.terminate {
-		return m.emitter(ctx, strings.Join(state.lines, "\n"), state.last, state.states[0])
+// unlink removes g from the last-touched list and the key map.
+func (a *Aggregator[T]) unlink(g *group[T]) {
+	if a.first == g {
+		a.first = g.next
 	}
-	for i, line := range state.lines {
-		if err := m.emitter(ctx, line, "", state.states[i]); err != nil {
-			return err
-		}
+	if a.last == g {
+		a.last = g.prev
 	}
-
-	return nil
+	if g.prev != nil {
+		g.prev.next = g.next
+	}
+	if g.next != nil {
+		g.next.prev = g.prev
+	}
+	g.prev = nil
+	g.next = nil
+	delete(a.groups, g.key)
 }
 
-// nfaAggregator groups lines using a state-machine [Matcher]. A group starts when a
-// line matches a transition out of the start state and continues while subsequent
-// lines advance the machine; it is emitted as a single line when it ends on a
-// terminal state, otherwise its lines are emitted individually.
-type nfaAggregator[T any] struct {
-	matcher Matcher
+// link appends g to the tail of the last-touched list.
+func (a *Aggregator[T]) link(g *group[T]) {
+	g.prev = a.last
+	g.next = nil
+	if a.first == nil {
+		a.first = g
+	}
+	if a.last != nil {
+		a.last.next = g
+	}
+	a.last = g
 }
 
-func (a *nfaAggregator[T]) add(m *Multiline[T], ctx context.Context, line, key string, data T) error {
-	state := m.states[key]
-	var next []int
-	var terminate bool
-	if state != nil {
-		if terminate, next = a.matcher.NextStates(line, state.nextPos); len(next) == 0 {
-			m.unlink(state, true)
-			if err := m.emit(ctx, state); err != nil {
-				return err
-			}
-		} else {
-			m.appendLine(state, line, data)
-
-			state.terminate = terminate
-			state.last = state.nextLast
-
-			state.nextLast = a.matcher.Name(next[0])
-			state.nextPos = next
-
-			m.moveLast(state)
-		}
+// moveLast moves g to the tail of the last-touched list.
+func (a *Aggregator[T]) moveLast(g *group[T]) {
+	if g == a.last {
+		return
 	}
-
-	if len(next) == 0 {
-		if terminate, next = a.matcher.NextStates(line, []int{0}); len(next) == 0 {
-			// No match for next. Emit line as is
-			return m.emitter(ctx, line, "", data)
-		}
-		// Set terminate to false. Can't terminate on first elem
-		state := m.newGroup(key)
-		m.appendLine(state, line, data)
-		state.terminate = terminate
-		state.nextLast = a.matcher.Name(next[0])
-		state.last = a.matcher.Name(0)
-		state.nextPos = next
-		m.link(state, true)
+	if a.first == g {
+		a.first = g.next
 	}
-
-	return nil
+	if g.prev != nil {
+		g.prev.next = g.next
+	}
+	if g.next != nil {
+		g.next.prev = g.prev
+	}
+	a.link(g)
 }

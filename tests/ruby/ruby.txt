@@ -1,0 +1,6 @@
+1,3,1
+starting worker
+main.rb:4:in `foo': undefined method `bar' for nil:NilClass (NoMethodError)
+	from main.rb:8:in `baz'
+	from main.rb:12:in `<main>'
+worker done
