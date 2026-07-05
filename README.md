@@ -1,5 +1,8 @@
 # Multiline
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/JohanLindvall/multiline.svg)](https://pkg.go.dev/github.com/JohanLindvall/multiline)
+[![CI](https://github.com/JohanLindvall/multiline/actions/workflows/ci.yml/badge.svg)](https://github.com/JohanLindvall/multiline/actions/workflows/ci.yml)
+
 `multiline` is a small, dependency-free Go library that aggregates log output
 spanning several physical lines — such as panic and exception stack traces —
 back into a single logical entry.
