@@ -14,8 +14,8 @@ Use the Makefile (same shape as JohanLindvall/lightning):
 - `make check` — golangci-lint (installed on demand) + test; keep it at 0
   issues
 - `make fix` — gofmt + go mod tidy
-- `make bench` — benchmarks (watch the no-match path; it runs every start
-  pattern on every line)
+- `make bench` — benchmarks (the no-match path must stay on the prefilter
+  fast path, ~100ns/line; see below)
 - `make fuzz` — 30s conservation-invariant fuzz burst
 - CI (`.github/workflows/ci.yml`) mirrors lightning: one check job per arch
   (amd64+arm64) running `make test`, lint once on amd64 via
@@ -63,6 +63,14 @@ run through the *default* matcher, so corpora for non-default sets (CRI)
 don't belong there — test those with `WithMatcher` unit tests instead.
 
 ## Gotchas
+
+- Start-pattern prefilter (`patterns/prefilter.go`): Compile derives literal
+  substrings from the start patterns (via regexp/syntax) so non-matching
+  lines skip the regexes entirely. Every start pattern must keep a provable
+  case-sensitive literal of >= 3 bytes, or the prefilter silently disables
+  for the whole machine — `TestBundledPrefilterEnabled` guards this; keep it
+  passing when adding formats. `TestPrefilterDifferential` proves the filter
+  never changes a decision.
 
 - `Truncated` reporting: when a capped group flushes, the flag is set on the
   aggregated entry if there is one, else on the last individually emitted

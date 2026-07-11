@@ -18,8 +18,8 @@ test:
 	go test -cover ./...
 
 # Run every benchmark without the tests. The no-match benchmark is the one to
-# watch: it pays every start pattern on every line, so it grows with each
-# bundled format.
+# watch: it must stay on the literal-prefilter fast path (~100ns/line), not
+# fall back to running every start pattern regex.
 bench:
 	go test -run='^$$' -bench=. -benchmem ./...
 

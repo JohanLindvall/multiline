@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // StartState is the name of the entry state where every group begins. Each
@@ -70,6 +71,11 @@ type StateMachine struct {
 	transitions [][]compiledTransition
 	format      []string
 	nonTerminal []bool
+
+	// startLiterals is the literal prefilter for the start state: a line that
+	// contains none of them cannot match any start transition, so Step skips
+	// the regexes. nil disables the prefilter (see StartLiterals).
+	startLiterals []string
 }
 
 // Compile builds a [StateMachine] from the given sets. Each set contributes
@@ -133,6 +139,10 @@ func Compile(sets ...StateSet) (*StateMachine, error) {
 		}
 	}
 
+	if lits, ok := startLiterals(sets); ok {
+		sm.startLiterals = lits
+	}
+
 	return sm, nil
 }
 
@@ -154,8 +164,15 @@ const maxActiveStates = 20
 // transitions of the active states and returns the new active set, plus the
 // index of an accepting state the line landed in (-1 if none). An empty next
 // means line does not continue any active state.
+//
+// When only the start state is active — the steady state of a log stream —
+// lines that cannot possibly begin a group are rejected by the literal
+// prefilter without running any regex (see [StateMachine.StartLiterals]).
 func (s *StateMachine) Step(line string, active []int) (next []int, accepted int) {
 	accepted = -1
+	if s.startLiterals != nil && len(active) == 1 && active[0] == 0 && !s.maybeStart(line) {
+		return nil, accepted
+	}
 	for _, state := range active {
 		for _, tr := range s.transitions[state] {
 			if !tr.pattern.MatchString(line) {
@@ -178,4 +195,23 @@ func (s *StateMachine) Step(line string, active []int) (next []int, accepted int
 // group reports as its Match.
 func (s *StateMachine) Format(index int) string {
 	return s.format[index]
+}
+
+func (s *StateMachine) maybeStart(line string) bool {
+	for _, lit := range s.startLiterals {
+		if strings.Contains(line, lit) {
+			return true
+		}
+	}
+	return false
+}
+
+// StartLiterals returns the literal prefilter derived from the start-state
+// patterns at Compile time: every line that matches any start transition
+// contains at least one of the returned substrings, so lines containing none
+// skip the start regexes entirely. It returns nil when no such set could be
+// proven for every start pattern and the prefilter is disabled — worth
+// checking in a test when start-pattern matching is on your hot path.
+func (s *StateMachine) StartLiterals() []string {
+	return slices.Clone(s.startLiterals)
 }
