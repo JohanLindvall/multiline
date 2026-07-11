@@ -2,6 +2,7 @@ package cri
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -26,6 +27,8 @@ func TestParse(t *testing.T) {
 		{"2024-01-01T10:00:00.000000001Z stdmix F nope", Line{}, false},
 		{"yesterday stdout F nope", Line{}, false},
 		{"plain application line", Line{}, false},
+		{" leading space", Line{}, false},
+		{"2024-01-01T10:00:00.000000001Z stdout", Line{}, false},
 		{"", Line{}, false},
 	} {
 		got, ok := Parse(tc.raw)
@@ -94,6 +97,68 @@ func TestDanglingFragments(t *testing.T) {
 	assert.Equal(t, "one ", (*got)[0].line)
 	assert.Equal(t, "two", (*got)[1].line)
 	assert.Len(t, *got, 2)
+}
+
+// TestNonCRIAfterFragments verifies that a non-CRI line while a fragment run
+// is open flushes the run first, in order.
+func TestNonCRIAfterFragments(t *testing.T) {
+	a, got := pipeline(t)
+	ctx := context.Background()
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stdout P dangling ", 0))
+	assert.NoError(t, a.Add(ctx, "c1", "plain line", 1))
+	// The non-CRI line bypasses the per-stream buffer, so the dangling
+	// fragment stays pending until flushed.
+	assert.Equal(t, []received{{"c1", "plain line", (*got)[0].when, 1}}, *got)
+	assert.NoError(t, a.Stop(ctx))
+	assert.Equal(t, "dangling ", (*got)[1].line)
+}
+
+// TestFlushBefore verifies time-based flushing of a run whose closing "F"
+// line never arrives, judged by log timestamps.
+func TestFlushBefore(t *testing.T) {
+	a, got := pipeline(t)
+	ctx := context.Background()
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stdout P dangling ", 0))
+	assert.NoError(t, a.FlushBefore(ctx, time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)))
+	assert.Empty(t, *got)
+	assert.NoError(t, a.FlushBefore(ctx, time.Date(2024, 1, 1, 10, 0, 5, 0, time.UTC)))
+	assert.Len(t, *got, 1)
+	assert.Equal(t, "dangling ", (*got)[0].line)
+}
+
+// TestNextErrors verifies that errors from the next stage propagate.
+func TestNextErrors(t *testing.T) {
+	boom := errors.New("boom")
+	a := New(func(_ context.Context, _, _ string, _ time.Time, _ int) error { return boom })
+	ctx := context.Background()
+
+	assert.ErrorIs(t, a.Add(ctx, "c1", "not cri", 0), boom)
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stdout P x", 0))
+	assert.ErrorIs(t, a.Flush(ctx, "c1"), boom)
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stdout P x", 0))
+	assert.ErrorIs(t, a.Stop(ctx), boom)
+}
+
+// TestRejoinDefensive locks the defensive branches of rejoin: entries whose
+// text is not CRI-formatted (unreachable through Add) are passed through
+// rather than dropped.
+func TestRejoinDefensive(t *testing.T) {
+	a, got := pipeline(t)
+	ctx := context.Background()
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "plain", Key: "k", Data: 1}))
+	assert.Equal(t, "plain", (*got)[0].line)
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "one\ntwo", Key: "k", Data: 2}))
+	assert.Equal(t, "onetwo", (*got)[1].line)
+	assert.True(t, (*got)[1].when.IsZero())
+}
+
+// TestMatcherDefensive locks the defensive branch of the matcher: a non-CRI
+// line (unreachable through Add, which bypasses the buffer on parse failure)
+// never continues a fragment run.
+func TestMatcherDefensive(t *testing.T) {
+	next, accepted := matcher{}.Step("plain", []int{statePartial})
+	assert.Empty(t, next)
+	assert.Equal(t, -1, accepted)
 }
 
 // TestNonCRIPassThrough verifies that lines that are not CRI-formatted reach

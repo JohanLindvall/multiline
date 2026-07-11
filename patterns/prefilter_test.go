@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,6 +32,33 @@ func TestRequiredLiterals(t *testing.T) {
 		// No literal at all.
 		{`^[A-Z]\d+`, nil, false},
 		{`invalid(`, nil, false},
+		// An alternation with an empty branch still product-expands.
+		{`xy(abc|)def`, []string{"xyabcdef", "xydef"}, true},
+		// Too many alternation branches exceed the product cap; the trailing
+		// child literal is still provable on its own.
+		{`(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)xyz`, []string{"xyz"}, true},
+		// A product exceeding the length cap falls back to the most selective
+		// single child literal.
+		{strings.Repeat("A", 40) + `(x|y)` + strings.Repeat("B", 30),
+			[]string{strings.Repeat("A", 40)}, true},
+		// Single-rune alternations are factored to character classes by the
+		// parser, so the run breaks and the branch literals are unioned.
+		{`(abc(d|e)|xyz)!`, []string{"abc", "xyz"}, true},
+		// Multi-rune alternations stay exact and product-expand through
+		// nested concats.
+		{`(ab(cd|ef)|xyz)!`, []string{"abcd!", "abef!", "xyz!"}, true},
+		// A product exceeding the set cap (5x5 > 16) restarts the run at the
+		// second group.
+		{`(aa|bb|cc|dd|ee)(a2|b2|c2|d2|e2)xyz`,
+			[]string{"a2xyz", "b2xyz", "c2xyz", "d2xyz", "e2xyz"}, true},
+		// An alternation exceeding the set cap cannot join an exact run.
+		{`(aa|bb|cc|dd|ee|ff|gg|hh|ii|jj|kk|ll|mm|nn|oo|pp|qq)xyz`,
+			[]string{"xyz"}, true},
+		// Case-folded branches cannot join an exact run.
+		{`(?i:AB|CD)efg`, []string{"efg"}, true},
+		// A nested concat whose own product caps out poisons its branch, and
+		// with it the whole pattern.
+		{`((aa|bb|cc|dd|ee)(ff|gg|hh|ii|jj)|xyz)!`, nil, false},
 	} {
 		got, ok := requiredLiterals(tc.pattern)
 		assert.Equal(t, tc.ok, ok, tc.pattern)
@@ -38,6 +66,22 @@ func TestRequiredLiterals(t *testing.T) {
 			assert.ElementsMatch(t, tc.want, got, tc.pattern)
 		}
 	}
+}
+
+// TestStartLiteralsDedupe verifies that duplicate probes and probes containing
+// another probe are dropped.
+func TestStartLiteralsDedupe(t *testing.T) {
+	sm := MustCompile(StateSet{Name: "a", States: []State{
+		{Name: StartState, Transitions: []Transition{
+			{Pattern: `foobar`, Next: "s"},
+			{Pattern: `xxfoobarxx`, Next: "s"}, // contains "foobar": redundant
+			{Pattern: `foobar!`, Next: "s"},    // contains "foobar": redundant
+			{Pattern: `foobar`, Next: "t"},     // exact duplicate
+		}},
+		{Name: "s"},
+		{Name: "t"},
+	}})
+	assert.Equal(t, []string{"foobar"}, sm.StartLiterals())
 }
 
 // TestBundledPrefilterEnabled guards the bundled sets: a new start pattern
@@ -139,4 +183,20 @@ func BenchmarkStepNoMatch(b *testing.B) {
 			sm.Step(line, start)
 		}
 	})
+}
+
+// BenchmarkStepNearMiss measures the worst case after the prefilter: a line
+// that contains a probe literal ("Error)") but matches no start pattern, so
+// every regex still runs.
+func BenchmarkStepNearMiss(b *testing.B) {
+	sm := MustCompile(All...)
+	line := `2024-11-19 11:00:00.123 WARN retry callback(Error) invoked for request 12345`
+	start := []int{0}
+	if next, _ := sm.Step(line, start); next != nil {
+		b.Fatal("line unexpectedly starts a group")
+	}
+	b.ReportAllocs()
+	for range b.N {
+		sm.Step(line, start)
+	}
 }
