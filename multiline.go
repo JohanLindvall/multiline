@@ -20,8 +20,14 @@ import (
 // Entry is one completed log entry handed to the [Emitter].
 type Entry[T any] struct {
 	// Text is the entry text; for an aggregated entry the source lines are
-	// joined by "\n".
+	// joined by "\n". It is left empty when [WithoutText] is configured.
 	Text string
+	// Texts is the entry's retained source lines, one element per line. It is
+	// a view borrowed from internal buffers, valid only until the emitter
+	// returns — copy it (e.g. slices.Clone) to retain. Writing the elements
+	// to an io.Writer avoids Text's joined allocation entirely (see
+	// [WithoutText]).
+	Texts []string
 	// Key is the key the entry's lines were added under. It allows chaining
 	// aggregation stages: an emitter can feed another Aggregator keyed by
 	// entry.Key (see examples/cri).
@@ -120,6 +126,9 @@ type Aggregator[T any] struct {
 	maxLines  int
 	maxBytes  int
 	maxGroups int
+	noText    bool
+
+	scratch [1]string // borrowed backing for single-line Entry.Texts
 }
 
 // Option configures an [Aggregator] at construction time.
@@ -131,6 +140,7 @@ type config struct {
 	maxLines  int
 	maxBytes  int
 	maxGroups int
+	noText    bool
 }
 
 // WithMatcher selects a custom [Matcher] (typically a [patterns.StateMachine]
@@ -164,6 +174,14 @@ func WithMaxGroups(n int) Option {
 	return func(c *config) { c.maxGroups = n }
 }
 
+// WithoutText skips building [Entry].Text (it is left empty), for emitters
+// that consume [Entry].Texts instead. This avoids joining an aggregated
+// entry's lines into one string — for a large capped trace, a copy the size
+// of the whole entry.
+func WithoutText() Option {
+	return func(c *config) { c.noText = true }
+}
+
 // WithClock replaces time.Now as the source of the arrival times that
 // [Aggregator.Add] stamps groups with (used by FlushBefore). Prefer
 // [Aggregator.AddAt] to supply per-line times, e.g. log timestamps.
@@ -187,6 +205,7 @@ func New[T any](emit Emitter[T], opts ...Option) *Aggregator[T] {
 		maxLines:  c.maxLines,
 		maxBytes:  c.maxBytes,
 		maxGroups: c.maxGroups,
+		noText:    c.noText,
 	}
 }
 
@@ -210,7 +229,7 @@ func (a *Aggregator[T]) Add(ctx context.Context, key, line string, data T) error
 // Entry.When stays zero.
 func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.Time, data T) error {
 	if key == "" {
-		return a.emit(ctx, Entry[T]{Text: line, When: when, Lines: 1, Data: data})
+		return a.emitLine(ctx, Entry[T]{When: when, Lines: 1, Data: data}, line)
 	}
 
 	if g := a.groups[key]; g != nil {
@@ -236,7 +255,7 @@ func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.T
 
 	next, _ := a.matcher.Step(line, startStates)
 	if len(next) == 0 {
-		return a.emit(ctx, Entry[T]{Text: line, Key: key, When: when, Lines: 1, Data: data})
+		return a.emitLine(ctx, Entry[T]{Key: key, When: when, Lines: 1, Data: data}, line)
 	}
 
 	// The accepted result is deliberately ignored here: an aggregated entry
@@ -255,6 +274,17 @@ func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.T
 	}
 
 	return nil
+}
+
+// emitLine hands a single-line entry to the emitter, lending the aggregator's
+// scratch slot as the Texts backing.
+func (a *Aggregator[T]) emitLine(ctx context.Context, e Entry[T], line string) error {
+	a.scratch[0] = line
+	e.Texts = a.scratch[:]
+	if !a.noText {
+		e.Text = line
+	}
+	return a.emit(ctx, e)
 }
 
 // stamp resolves the staleness timestamp for a buffered line: the caller's
@@ -374,21 +404,28 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 	tail := 0
 	if k := g.acceptedLines; k > 0 {
 		tail = k
-		if err := a.emit(ctx, Entry[T]{
-			Text:      strings.Join(g.lines[:k], "\n"),
+		e := Entry[T]{
+			Texts:     g.lines[:k],
 			Key:       g.key,
 			Match:     g.match,
 			When:      g.aux[0].when,
 			Data:      g.aux[0].data,
 			Lines:     g.acceptedTotal,
 			Truncated: g.capped,
-		}); err != nil {
+		}
+		if !a.noText {
+			e.Text = strings.Join(g.lines[:k], "\n")
+		}
+		if err := a.emit(ctx, e); err != nil {
 			return err
 		}
 	}
 
 	for i := tail; i < len(g.lines); i++ {
-		e := Entry[T]{Text: g.lines[i], Key: g.key, When: g.aux[i].when, Lines: 1, Data: g.aux[i].data}
+		e := Entry[T]{Texts: g.lines[i : i+1], Key: g.key, When: g.aux[i].when, Lines: 1, Data: g.aux[i].data}
+		if !a.noText {
+			e.Text = g.lines[i]
+		}
 		if tail == 0 && g.capped && i == len(g.lines)-1 {
 			e.Truncated = true
 		}

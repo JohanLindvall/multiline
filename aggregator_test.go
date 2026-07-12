@@ -3,6 +3,7 @@ package multiline
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -171,4 +172,34 @@ func TestIntrospection(t *testing.T) {
 	assert.NoError(t, ml.Stop(ctx))
 	assert.Zero(t, ml.Len())
 	assert.Zero(t, ml.Bytes())
+}
+
+// TestTexts verifies the zero-copy line view: Texts carries the retained
+// source lines for every entry shape, and WithoutText leaves Text empty while
+// Texts stays complete.
+func TestTexts(t *testing.T) {
+	trace := []string{
+		"java.lang.NullPointerException: boom",
+		"\tat com.example.Foo.bar(Foo.java:12)",
+		"plain",
+	}
+
+	var texts [][]string
+	var joined []string
+	ml := New(func(_ context.Context, e Entry[struct{}]) error {
+		texts = append(texts, slices.Clone(e.Texts))
+		joined = append(joined, e.Text)
+		return nil
+	}, WithoutText())
+	ctx := context.Background()
+	for _, line := range trace {
+		assert.NoError(t, ml.Add(ctx, "k", line, struct{}{}))
+	}
+	assert.NoError(t, ml.Stop(ctx))
+
+	assert.Equal(t, [][]string{
+		{"java.lang.NullPointerException: boom", "\tat com.example.Foo.bar(Foo.java:12)"},
+		{"plain"},
+	}, texts)
+	assert.Equal(t, []string{"", ""}, joined, "WithoutText leaves Text empty")
 }

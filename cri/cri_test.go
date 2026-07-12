@@ -145,9 +145,9 @@ func TestNextErrors(t *testing.T) {
 func TestRejoinDefensive(t *testing.T) {
 	a, got := pipeline(t)
 	ctx := context.Background()
-	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "plain", Key: "k", Data: 1}))
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Texts: []string{"plain"}, Key: "k", Data: 1}))
 	assert.Equal(t, received{"k", "plain", time.Time{}, 1}, (*got)[0])
-	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "one\ntwo", Key: "k", Data: 2}))
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Texts: []string{"one", "two"}, Key: "k", Data: 2}))
 	assert.Equal(t, received{"k", "onetwo", time.Time{}, 2}, (*got)[1])
 }
 

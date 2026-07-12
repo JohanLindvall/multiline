@@ -171,7 +171,8 @@ type Aggregator[T any] struct {
 // ignored.
 func New[T any](next Next[T], opts ...multiline.Option) *Aggregator[T] {
 	a := &Aggregator[T]{next: next}
-	a.inner = multiline.New(a.rejoin, append(opts, multiline.WithMatcher(matcher{}))...)
+	// rejoin consumes Entry.Texts, so the inner aggregator never joins.
+	a.inner = multiline.New(a.rejoin, append(opts, multiline.WithMatcher(matcher{}), multiline.WithoutText())...)
 	return a
 }
 
@@ -225,18 +226,19 @@ func (a *Aggregator[T]) streamKey(key, stream string) string {
 // rejoin receives buffered raw lines from the inner aggregator — a completed
 // fragment run, or a flushed dangling fragment — and forwards the stripped,
 // concatenated content, stamped with the first line's timestamp (Entry.When).
+// It consumes Entry.Texts, so the fragments are never joined and re-split.
 func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[T]) error {
-	if !strings.Contains(e.Text, "\n") {
-		if _, _, content, ok := meta(e.Text); ok {
+	if len(e.Texts) == 1 {
+		if _, _, content, ok := meta(e.Texts[0]); ok {
 			return a.next(ctx, e.Key, content, e.When, e.Data)
 		}
 		// Cannot happen for lines admitted through Add/AddParsed; keep the
 		// text rather than dropping it.
-		return a.next(ctx, e.Key, e.Text, e.When, e.Data)
+		return a.next(ctx, e.Key, e.Texts[0], e.When, e.Data)
 	}
 
 	var text strings.Builder
-	for _, fragment := range strings.Split(e.Text, "\n") {
+	for _, fragment := range e.Texts {
 		if _, _, content, ok := meta(fragment); ok {
 			text.WriteString(content)
 		} else {

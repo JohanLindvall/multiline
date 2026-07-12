@@ -2,6 +2,7 @@ package multiline
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/JohanLindvall/multiline/patterns"
@@ -25,6 +26,9 @@ func collectBounded(t *testing.T, header, cont string, lines []string, opts ...O
 	t.Helper()
 	var got []Entry[int]
 	ml := continuation(t, header, cont, func(_ context.Context, e Entry[int]) error {
+		// Texts always mirrors Text; drop the borrowed slice before retaining.
+		assert.Equal(t, e.Text, strings.Join(e.Texts, "\n"))
+		e.Texts = nil
 		got = append(got, e)
 		return nil
 	}, opts...)

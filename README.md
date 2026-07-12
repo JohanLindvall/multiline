@@ -40,7 +40,8 @@ receives an `Entry`:
 
 | Field       | Meaning |
 | ----------- | ------- |
-| `Text`      | The entry text; aggregated source lines are joined by `"\n"`. |
+| `Text`      | The entry text; aggregated source lines are joined by `"\n"` (empty with `WithoutText`). |
+| `Texts`     | The retained source lines, one element per line — a view borrowed until the emitter returns; copy to retain. |
 | `Key`       | The key the lines were added under. |
 | `Match`     | Name of the format that aggregated the entry (`"go"`, `"java"`, …), or `""` for a line passed through as-is. |
 | `When`      | Time of the entry's first source line, as passed to `AddAt` (zero for lines fed via `Add`). |
@@ -149,6 +150,11 @@ ml := multiline.New(emit,
 	multiline.WithMaxBytes(64*1024),
 	multiline.WithMaxGroups(10_000))
 ```
+
+An emitter that writes lines to an `io.Writer` can consume `Entry.Texts` and
+pass `WithoutText()`, which skips joining aggregated lines into `Entry.Text`
+entirely — for a large capped trace, that saves a copy the size of the whole
+entry.
 
 ## Custom formats
 

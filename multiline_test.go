@@ -87,6 +87,9 @@ func collect(t *testing.T, key string, lines []string, opts ...Option) []Entry[i
 	t.Helper()
 	var got []Entry[int]
 	ml := New(func(_ context.Context, e Entry[int]) error {
+		// Texts always mirrors Text; drop the borrowed slice before retaining.
+		assert.Equal(t, e.Text, strings.Join(e.Texts, "\n"))
+		e.Texts = nil
 		got = append(got, e)
 		return nil
 	}, opts...)

@@ -26,6 +26,9 @@ func FuzzConservation(f *testing.F) {
 			if e.Data != consumed {
 				t.Fatalf("entry starting at line %d carries data %d", consumed, e.Data)
 			}
+			if joined := strings.Join(e.Texts, "\n"); joined != e.Text {
+				t.Fatalf("Texts %q does not mirror Text %q", joined, e.Text)
+			}
 			if e.Truncated {
 				t.Fatalf("truncated entry without caps: %q", e.Text)
 			}
