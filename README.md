@@ -214,7 +214,10 @@ err := logs.Add(ctx, containerID, rawLine, data)
 options to bound fragment buffering, and has its own `Flush`, `FlushBefore`
 and `Stop` (stop the upstream stage first). Lines that are not CRI-formatted
 pass through unmodified, and `cri.Parse` is exported for callers that need
-the pieces. A runnable pipeline lives in
+the pieces. A tailer that already parses each line (to derive the key, or to
+route by stream) should feed the parse result to `AddParsed` instead of
+`Add` — the timestamp is then parsed exactly once per line on the whole
+path, roughly halving the per-line cost. A runnable pipeline lives in
 [examples/cri](examples/cri/main.go) (`go run ./examples/cri`). Docker's
 json-file driver is a different format and needs JSON unwrapping instead.
 

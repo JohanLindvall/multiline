@@ -34,7 +34,10 @@ Use the Makefile (same shape as JohanLindvall/lightning):
 - `cri/` — Kubernetes CRI partial-line rejoining as a stage in front of the
   root aggregator. Has its own hand-written `Matcher` and `Parse`; does not
   use regex. `cri.Next[T]` is deliberately signature-compatible with
-  `(*multiline.Aggregator[T]).AddAt`
+  `(*multiline.Aggregator[T]).AddAt`. The timestamp is parsed at most once
+  per line (zero times via `AddParsed`): internal paths use the cheap `meta`
+  split and recover the first fragment's time from the `lineData` wrapper —
+  don't reintroduce `Parse` calls on buffered lines
 - `tests/<format>/*.txt` — corpus files, the behavioral spec
 
 ## Matcher semantics (the part worth re-reading)

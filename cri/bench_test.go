@@ -20,6 +20,24 @@ func BenchmarkAddFull(b *testing.B) {
 	}
 }
 
+// BenchmarkAddParsedFull is BenchmarkAddFull for a caller that already parsed
+// the line (e.g. to derive the key): the timestamp parse is skipped entirely.
+func BenchmarkAddParsedFull(b *testing.B) {
+	a := New(func(_ context.Context, _, _ string, _ time.Time, _ struct{}) error { return nil })
+	ctx := context.Background()
+	line := "2024-01-01T10:00:00.000000001Z stdout F GET /healthz 200 in 1.2ms"
+	l, ok := Parse(line)
+	if !ok {
+		b.Fatal("parse failed")
+	}
+	b.ReportAllocs()
+	for range b.N {
+		if err := a.AddParsed(ctx, "container-1", l, line, struct{}{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkAddFragments measures rejoining a partial-line run.
 func BenchmarkAddFragments(b *testing.B) {
 	a := New(func(_ context.Context, _, _ string, _ time.Time, _ struct{}) error { return nil })

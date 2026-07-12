@@ -13,6 +13,10 @@
 //	logs := cri.New(traces.AddAt)
 //	err := logs.Add(ctx, containerID, rawLine, data)
 //
+// A caller that has already parsed the line (for example to derive the key)
+// can pass the parse result to [Aggregator.AddParsed] instead; the timestamp
+// is then parsed exactly once per line on the whole path.
+//
 // Docker's json-file driver is a different format and needs JSON unwrapping
 // instead.
 package cri
@@ -46,15 +50,28 @@ func Parse(raw string) (Line, bool) {
 	if err != nil {
 		return l, false
 	}
-	rest := raw[sp+1:]
-
-	sp = strings.IndexByte(rest, ' ')
-	if sp <= 0 {
+	stream, partial, content, ok := splitMeta(raw[sp+1:])
+	if !ok {
 		return l, false
 	}
-	stream := rest[:sp]
+
+	l.Time = t
+	l.Stream = stream
+	l.Partial = partial
+	l.Content = content
+	return l, true
+}
+
+// splitMeta splits "<stream> <tag> <content>" — a raw CRI line after its
+// timestamp token.
+func splitMeta(rest string) (stream string, partial bool, content string, ok bool) {
+	sp := strings.IndexByte(rest, ' ')
+	if sp <= 0 {
+		return "", false, "", false
+	}
+	stream = rest[:sp]
 	if stream != "stdout" && stream != "stderr" {
-		return l, false
+		return "", false, "", false
 	}
 	rest = rest[sp+1:]
 
@@ -71,16 +88,24 @@ func Parse(raw string) (Line, bool) {
 	}
 	switch tag {
 	case "P":
-		l.Partial = true
+		partial = true
 	case "F":
 	default:
-		return l, false
+		return "", false, "", false
 	}
 
-	l.Time = t
-	l.Stream = stream
-	l.Content = rest
-	return l, true
+	return stream, partial, rest, true
+}
+
+// meta is [splitMeta] with the timestamp token skipped unvalidated: the
+// internal paths only ever see lines whose timestamp was parsed on entry, so
+// re-parsing it (the expensive part of Parse) would be wasted work.
+func meta(raw string) (stream string, partial bool, content string, ok bool) {
+	sp := strings.IndexByte(raw, ' ')
+	if sp <= 0 {
+		return "", false, "", false
+	}
+	return splitMeta(raw[sp+1:])
 }
 
 // Matcher state indices: a group opens on a "P" fragment and completes on the
@@ -96,19 +121,19 @@ var (
 	fullNext    = []int{stateFull}
 )
 
-// matcher implements multiline.Matcher for CRI fragment runs by parsing each
-// raw line instead of pattern matching.
+// matcher implements multiline.Matcher for CRI fragment runs by splitting
+// each raw line instead of pattern matching.
 type matcher struct{}
 
 func (matcher) Step(line string, active []int) (next []int, accepted int) {
 	if active[0] == stateFull {
 		return nil, -1 // the "F" line completed the entry
 	}
-	l, ok := Parse(line)
+	_, partial, _, ok := meta(line)
 	if !ok {
 		return nil, -1
 	}
-	if l.Partial {
+	if partial {
 		return partialNext, -1
 	}
 	if active[0] == statePartial {
@@ -125,11 +150,24 @@ func (matcher) Format(int) string { return "cri" }
 // multiline.Aggregator satisfies Next directly.
 type Next[T any] func(ctx context.Context, key, line string, when time.Time, data T) error
 
+// lineData rides through the internal aggregator alongside each buffered
+// line, so rejoin recovers the first fragment's timestamp without re-parsing.
+type lineData[T any] struct {
+	when time.Time
+	data T
+}
+
 // Aggregator rejoins CRI partial lines. Like multiline.Aggregator it is not
 // safe for concurrent use.
 type Aggregator[T any] struct {
-	inner *multiline.Aggregator[T]
+	inner *multiline.Aggregator[lineData[T]]
 	next  Next[T]
+
+	// Cached "<key>/<stream>" strings for the previous key, so the steady
+	// state of tailing one container allocates nothing per line.
+	lastKey    string
+	lastStdout string
+	lastStderr string
 }
 
 // New creates a CRI rejoining stage in front of next. The multiline options
@@ -153,40 +191,60 @@ func (a *Aggregator[T]) Add(ctx context.Context, key, raw string, data T) error 
 	if !ok {
 		return a.next(ctx, key, raw, time.Now(), data)
 	}
+	return a.AddParsed(ctx, key, l, raw, data)
+}
+
+// AddParsed is [Aggregator.Add] for callers that already parsed raw — for
+// example to derive the key or to filter by stream. It skips the internal
+// [Parse], so the line's timestamp is parsed exactly once on the whole path.
+// line must be the [Parse] result of raw.
+func (a *Aggregator[T]) AddParsed(ctx context.Context, key string, line Line, raw string, data T) error {
 	if key != "" {
-		key += "/" + l.Stream
+		key = a.streamKey(key, line.Stream)
 	}
-	return a.inner.AddAt(ctx, key, raw, l.Time, data)
+	return a.inner.AddAt(ctx, key, raw, line.Time, lineData[T]{when: line.Time, data: data})
+}
+
+// streamKey returns "<key>/<stream>", cached for the previous key so repeated
+// lines from one source do not allocate.
+func (a *Aggregator[T]) streamKey(key, stream string) string {
+	if key != a.lastKey {
+		a.lastKey = key
+		a.lastStdout = key + "/stdout"
+		a.lastStderr = key + "/stderr"
+	}
+	switch stream {
+	case "stdout":
+		return a.lastStdout
+	case "stderr":
+		return a.lastStderr
+	default: // only reachable via AddParsed with a non-CRI stream
+		return key + "/" + stream
+	}
 }
 
 // rejoin receives buffered raw lines from the inner aggregator — a completed
 // fragment run, or a single line — and forwards the stripped, concatenated
-// content.
-func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[T]) error {
+// content, stamped with the first line's timestamp.
+func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[lineData[T]]) error {
 	if !strings.Contains(e.Text, "\n") {
-		l, ok := Parse(e.Text)
-		if !ok {
-			return a.next(ctx, e.Key, e.Text, time.Now(), e.Data)
+		if _, _, content, ok := meta(e.Text); ok {
+			return a.next(ctx, e.Key, content, e.Data.when, e.Data.data)
 		}
-		return a.next(ctx, e.Key, l.Content, l.Time, e.Data)
+		// Cannot happen for lines admitted through Add/AddParsed; keep the
+		// text rather than dropping it.
+		return a.next(ctx, e.Key, e.Text, e.Data.when, e.Data.data)
 	}
 
 	var text strings.Builder
-	var when time.Time
-	for i, fragment := range strings.Split(e.Text, "\n") {
-		l, ok := Parse(fragment)
-		if !ok {
-			// Cannot happen for lines admitted by the matcher; keep the
-			// fragment rather than dropping it.
+	for _, fragment := range strings.Split(e.Text, "\n") {
+		if _, _, content, ok := meta(fragment); ok {
+			text.WriteString(content)
+		} else {
 			text.WriteString(fragment)
-			continue
 		}
-		if i == 0 {
-			when = l.Time
-		}
-		text.WriteString(l.Content)
 	}
-	return a.next(ctx, e.Key, text.String(), when, e.Data)
+	return a.next(ctx, e.Key, text.String(), e.Data.when, e.Data.data)
 }
 
 // Flush hands any pending fragments of key's streams to the next stage. Call

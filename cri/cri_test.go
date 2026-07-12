@@ -145,11 +145,41 @@ func TestNextErrors(t *testing.T) {
 func TestRejoinDefensive(t *testing.T) {
 	a, got := pipeline(t)
 	ctx := context.Background()
-	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "plain", Key: "k", Data: 1}))
-	assert.Equal(t, "plain", (*got)[0].line)
-	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "one\ntwo", Key: "k", Data: 2}))
-	assert.Equal(t, "onetwo", (*got)[1].line)
-	assert.True(t, (*got)[1].when.IsZero())
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[lineData[int]]{Text: "plain", Key: "k", Data: lineData[int]{data: 1}}))
+	assert.Equal(t, received{"k", "plain", time.Time{}, 1}, (*got)[0])
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[lineData[int]]{Text: "one\ntwo", Key: "k", Data: lineData[int]{data: 2}}))
+	assert.Equal(t, received{"k", "onetwo", time.Time{}, 2}, (*got)[1])
+}
+
+// TestAddParsed verifies that pre-parsed feeding behaves exactly like Add,
+// including stream keying and fragment rejoining.
+func TestAddParsed(t *testing.T) {
+	lines := []string{
+		"2024-01-01T10:00:00.000000001Z stdout F whole line",
+		"2024-01-01T10:00:01.000000001Z stdout P first, ",
+		"2024-01-01T10:00:01.000000002Z stderr F other stream",
+		"2024-01-01T10:00:01.000000003Z stdout F last",
+	}
+
+	viaAdd, gotAdd := pipeline(t)
+	viaParsed, gotParsed := pipeline(t)
+	ctx := context.Background()
+	for i, raw := range lines {
+		assert.NoError(t, viaAdd.Add(ctx, "c1", raw, i))
+		l, ok := Parse(raw)
+		assert.True(t, ok, raw)
+		assert.NoError(t, viaParsed.AddParsed(ctx, "c1", l, raw, i))
+	}
+	assert.NoError(t, viaAdd.Stop(ctx))
+	assert.NoError(t, viaParsed.Stop(ctx))
+	assert.Equal(t, *gotAdd, *gotParsed)
+	assert.Len(t, *gotParsed, 3)
+
+	// A non-CRI stream from a trusting caller still gets a distinct key.
+	assert.NoError(t, viaParsed.AddParsed(ctx, "c1",
+		Line{Time: time.Unix(1, 0), Stream: "weird", Partial: false, Content: "x"},
+		"x", 9))
+	assert.Equal(t, "c1/weird", (*gotParsed)[3].key)
 }
 
 // TestMatcherDefensive locks the defensive branch of the matcher: a non-CRI
