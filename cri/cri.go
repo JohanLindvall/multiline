@@ -188,17 +188,20 @@ func New[T any](next Next[T], opts ...multiline.Option) *Aggregator[T] {
 // time.
 func (a *Aggregator[T]) Add(ctx context.Context, key, raw string, data T) error {
 	l, ok := Parse(raw)
-	if !ok {
-		return a.next(ctx, key, raw, time.Now(), data)
-	}
-	return a.AddParsed(ctx, key, l, raw, data)
+	return a.AddParsed(ctx, key, raw, l, ok, data)
 }
 
 // AddParsed is [Aggregator.Add] for callers that already parsed raw — for
 // example to derive the key or to filter by stream. It skips the internal
-// [Parse], so the line's timestamp is parsed exactly once on the whole path.
-// line must be the [Parse] result of raw.
-func (a *Aggregator[T]) AddParsed(ctx context.Context, key string, line Line, raw string, data T) error {
+// [Parse], so the line's timestamp is parsed exactly once on the whole path
+// (the buffering, grouping and rejoining stages use a cheap structural split
+// that never re-parses it). line and ok must be the [Parse] results of raw;
+// ok false feeds raw through unmodified as a non-CRI line, stamped with the
+// current time.
+func (a *Aggregator[T]) AddParsed(ctx context.Context, key, raw string, line Line, ok bool, data T) error {
+	if !ok {
+		return a.next(ctx, key, raw, time.Now(), data)
+	}
 	if key != "" {
 		key = a.streamKey(key, line.Stream)
 	}

@@ -151,14 +151,17 @@ func TestRejoinDefensive(t *testing.T) {
 	assert.Equal(t, received{"k", "onetwo", time.Time{}, 2}, (*got)[1])
 }
 
-// TestAddParsed verifies that pre-parsed feeding behaves exactly like Add,
-// including stream keying and fragment rejoining.
+// TestAddParsed verifies that pre-parsed feeding behaves exactly like Add on
+// a mixed CRI / non-CRI / fragment-run corpus, including stream keying and
+// the ok=false passthrough.
 func TestAddParsed(t *testing.T) {
 	lines := []string{
 		"2024-01-01T10:00:00.000000001Z stdout F whole line",
+		"not a CRI line at all",
 		"2024-01-01T10:00:01.000000001Z stdout P first, ",
 		"2024-01-01T10:00:01.000000002Z stderr F other stream",
 		"2024-01-01T10:00:01.000000003Z stdout F last",
+		"2024-01-01T10:00:02.000000001Z stdout P dangling ",
 	}
 
 	viaAdd, gotAdd := pipeline(t)
@@ -167,19 +170,46 @@ func TestAddParsed(t *testing.T) {
 	for i, raw := range lines {
 		assert.NoError(t, viaAdd.Add(ctx, "c1", raw, i))
 		l, ok := Parse(raw)
-		assert.True(t, ok, raw)
-		assert.NoError(t, viaParsed.AddParsed(ctx, "c1", l, raw, i))
+		assert.NoError(t, viaParsed.AddParsed(ctx, "c1", raw, l, ok, i))
 	}
 	assert.NoError(t, viaAdd.Stop(ctx))
 	assert.NoError(t, viaParsed.Stop(ctx))
-	assert.Equal(t, *gotAdd, *gotParsed)
-	assert.Len(t, *gotParsed, 3)
+
+	// The non-CRI passthrough is stamped with the current time, so compare it
+	// separately from the deterministic fields.
+	assert.Equal(t, len(*gotAdd), len(*gotParsed))
+	for i := range *gotAdd {
+		a, p := (*gotAdd)[i], (*gotParsed)[i]
+		assert.Equal(t, a.key, p.key, i)
+		assert.Equal(t, a.line, p.line, i)
+		assert.Equal(t, a.data, p.data, i)
+		if a.line != "not a CRI line at all" {
+			assert.Equal(t, a.when, p.when, i)
+		}
+	}
+	assert.Len(t, *gotParsed, 5)
 
 	// A non-CRI stream from a trusting caller still gets a distinct key.
-	assert.NoError(t, viaParsed.AddParsed(ctx, "c1",
+	assert.NoError(t, viaParsed.AddParsed(ctx, "c1", "x",
 		Line{Time: time.Unix(1, 0), Stream: "weird", Partial: false, Content: "x"},
-		"x", 9))
-	assert.Equal(t, "c1/weird", (*gotParsed)[3].key)
+		true, 9))
+	assert.Equal(t, "c1/weird", (*gotParsed)[5].key)
+}
+
+// TestFlushDrivenTimestamps verifies that emissions driven by Stop and
+// FlushBefore — which happen outside any Add call — still carry each
+// fragment's own log timestamp.
+func TestFlushDrivenTimestamps(t *testing.T) {
+	a, got := pipeline(t)
+	ctx := context.Background()
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stdout P one ", 0))
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000002Z stdout P two", 1))
+	assert.NoError(t, a.Stop(ctx))
+
+	assert.Equal(t, []received{
+		{"c1/stdout", "one ", time.Date(2024, 1, 1, 10, 0, 0, 1, time.UTC), 0},
+		{"c1/stdout", "two", time.Date(2024, 1, 1, 10, 0, 0, 2, time.UTC), 1},
+	}, *got)
 }
 
 // TestMatcherDefensive locks the defensive branch of the matcher: a non-CRI

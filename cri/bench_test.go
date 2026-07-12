@@ -32,7 +32,7 @@ func BenchmarkAddParsedFull(b *testing.B) {
 	}
 	b.ReportAllocs()
 	for range b.N {
-		if err := a.AddParsed(ctx, "container-1", l, line, struct{}{}); err != nil {
+		if err := a.AddParsed(ctx, "container-1", line, l, ok, struct{}{}); err != nil {
 			b.Fatal(err)
 		}
 	}
