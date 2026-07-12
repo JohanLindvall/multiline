@@ -1,10 +1,11 @@
 package patterns
 
 // javaHeader matches an exception/error headline. It intentionally also
-// matches Node.js/V8 errors ("TypeError: ...", "V8 errors stack trace"),
-// whose frame lines share the Java "at ..." shape.
+// matches Node.js errors with an error-class prefix ("TypeError: ..."),
+// whose frame lines share the Java "at ..." shape; bare "Error:" headlines
+// and the V8 marker are covered by the [NodeJS] set.
 var javaHeader = []Transition{
-	{Pattern: `.(Exception|Error|Throwable|V8 errors stack trace):`, Next: "after_exception"},
+	{Pattern: `.(Exception|Error|Throwable):`, Next: "after_exception"},
 }
 
 // javaFrames continues a stack trace body.

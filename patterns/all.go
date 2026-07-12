@@ -5,4 +5,4 @@ package patterns
 // append your own sets to extend it. Like the individual set variables, All
 // is exported data: treat it as read-only and build new slices instead of
 // mutating it.
-var All = []StateSet{Go, Java, Python, DotNet, Ruby, Rust, PHP}
+var All = []StateSet{Go, Java, NodeJS, Python, DotNet, Ruby, Rust, PHP}

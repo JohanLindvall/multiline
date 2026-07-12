@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"strings"
 )
 
 // StartState is the name of the entry state where every group begins. Each
@@ -53,7 +52,8 @@ type State struct {
 
 // StateSet is a named group of states describing one multi-line format. The
 // set's Name is reported as the Match of entries it aggregated (for the
-// bundled sets: "go", "java", "python", "dotnet", "ruby", "rust", "php").
+// bundled sets: "go", "java", "nodejs", "python", "dotnet", "ruby", "rust",
+// "php").
 type StateSet struct {
 	Name   string
 	States []State
@@ -209,12 +209,7 @@ func (s *StateMachine) Step(line string, active []int) (next []int, accepted int
 // stepStart is Step for the prefiltered start state: probe literals select
 // the candidate transitions, and only those regexes run.
 func (s *StateMachine) stepStart(line string) (next []int, accepted int) {
-	var mask uint64
-	for i, lit := range s.pf.literals {
-		if strings.Contains(line, lit) {
-			mask |= s.pf.masks[i]
-		}
-	}
+	mask := s.pf.scan(line)
 	accepted = -1
 	if mask == 0 {
 		return nil, accepted

@@ -30,6 +30,24 @@ import (
 type prefilter struct {
 	literals []string
 	masks    []uint64
+	// ac replaces the linear Contains scan when the literal count crosses
+	// acMinLiterals (see ahocorasick.go); nil otherwise.
+	ac *ahoCorasick
+}
+
+// scan returns the union of the candidate-transition masks of every probe
+// literal contained in line.
+func (pf *prefilter) scan(line string) uint64 {
+	if pf.ac != nil {
+		return pf.ac.scan(line)
+	}
+	var mask uint64
+	for i, lit := range pf.literals {
+		if strings.Contains(line, lit) {
+			mask |= pf.masks[i]
+		}
+	}
+	return mask
 }
 
 // startPrefilter derives the prefilter from every start-state transition of
@@ -97,6 +115,9 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 			pf.literals = append(pf.literals, p.lit)
 			pf.masks = append(pf.masks, p.mask)
 		}
+	}
+	if len(pf.literals) >= acMinLiterals {
+		pf.ac = buildAhoCorasick(pf.literals, pf.masks)
 	}
 	return pf, true
 }

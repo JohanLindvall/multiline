@@ -1,0 +1,7 @@
+1,4,1
+server listening on :3000
+Error: connect ECONNREFUSED 127.0.0.1:5432
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1300:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async main (/app/src/index.js:12:3)
+request failed

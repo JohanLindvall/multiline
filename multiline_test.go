@@ -141,6 +141,24 @@ func TestAcceptedPrefix(t *testing.T) {
 	}, got)
 }
 
+// TestNodeJSMatch verifies that bare "Error:" traces report the nodejs set
+// while error-class-prefixed ones stay with java (shared frame shape).
+func TestNodeJSMatch(t *testing.T) {
+	got := collect(t, "k", []string{
+		"Error: connect ECONNREFUSED",
+		"    at TCPConnectWrap.afterConnect (node:net:1300:16)",
+		"TypeError: x is not a function",
+		"    at main (/app/index.js:3:1)",
+		"plain",
+	})
+	assert.Len(t, got, 3)
+	assert.Equal(t, "nodejs", got[0].Match)
+	assert.Equal(t, 2, got[0].Lines)
+	assert.Equal(t, "java", got[1].Match)
+	assert.Equal(t, 2, got[1].Lines)
+	assert.Equal(t, "plain", got[2].Text)
+}
+
 // TestStopOrder verifies that Stop flushes groups oldest-first, not in map
 // order.
 func TestStopOrder(t *testing.T) {

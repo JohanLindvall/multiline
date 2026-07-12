@@ -15,7 +15,9 @@ ordinary single-line logs straight through untouched.
 ## Supported formats
 
 - Go (`panic:` / goroutine dumps)
-- Java / JVM (also matches Node.js stack traces, which share the `at ...` shape)
+- Java / JVM (also claims Node.js traces with an error-class headline like
+  `TypeError:`, which share the `at ...` frame shape)
+- Node.js (bare `Error:` headlines and V8 stack-trace markers)
 - Python (including chained exceptions)
 - .NET
 - Ruby
@@ -161,7 +163,7 @@ entry.
 Matching is driven by declarative state machines in the
 [patterns](patterns) subpackage. The bundled definitions are exported
 (`patterns.Go`, `patterns.Java`, `patterns.Python`, `patterns.DotNet`,
-`patterns.Ruby`, `patterns.Rust`, `patterns.PHP`, collected in
+`patterns.NodeJS`, `patterns.Ruby`, `patterns.Rust`, `patterns.PHP`, collected in
 `patterns.All`), so you can compile a subset, or add your own set alongside
 them — its `Name` is what completed entries report as `Match`:
 

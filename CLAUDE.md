@@ -92,8 +92,14 @@ don't belong there — test those with `WithMatcher` unit tests instead.
   away.
 - `FlushBefore` assumes non-decreasing times across `Add`/`AddAt` calls (the
   linked list is only sorted if times are).
-- Java's header pattern intentionally matches Node.js errors; the set is
-  named `java` but covers both. Loose by design (fluent-bit parity).
+- Java's header pattern intentionally matches Node.js errors with an
+  error-class prefix ("TypeError:"); only bare "Error:" headlines and the V8
+  marker report `nodejs`. The two formats share the "at" frame shape and
+  cannot be told apart reliably, so ambiguous traces stay `java` by design.
+- Prefilter scanning is linear strings.Contains below `acMinLiterals` probe
+  literals and a dense Aho-Corasick automaton at or above it (crossover
+  measured by `BenchmarkPrefilterScan`); the bundled sets stay linear. Both
+  scanners are differentially tested against each other.
 - go.mod declares `go 1.22` (needs range-over-int); don't let tooling bump it
   to the local toolchain version, and don't use newer stdlib/testing APIs
   (e.g. `b.Loop`, `strings.SplitSeq`) without raising it deliberately.

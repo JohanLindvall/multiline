@@ -220,13 +220,16 @@ func TestPrefilterMasks(t *testing.T) {
 	}
 
 	// Start-transition order follows the set order in All: go declares
-	// transitions 0-1, java 2, python 3, dotnet 4-5, ruby 6, rust 7, php 8.
+	// transitions 0-1, java 2, nodejs 3-4, python 5, dotnet 6-7, ruby 8,
+	// rust 9, php 10. The nodejs "Error: " probe folds into java's shorter
+	// "Error:", so that literal implies both sets' transitions.
 	assert.Equal(t, uint64(1<<0), maskOf("panic: "))
 	assert.Equal(t, uint64(1<<1), maskOf("http: panic serving"))
-	assert.Equal(t, uint64(1<<2), maskOf("Error:"))
-	assert.Equal(t, uint64(1<<3), maskOf("Traceback (most recent call last):"))
-	assert.Equal(t, uint64(1<<4|1<<5), maskOf("Unhandled exception. "))
-	assert.Equal(t, uint64(1<<6), maskOf("Error)"))
+	assert.Equal(t, uint64(1<<2|1<<3), maskOf("Error:"))
+	assert.Equal(t, uint64(1<<4), maskOf("V8 errors stack trace:"))
+	assert.Equal(t, uint64(1<<5), maskOf("Traceback (most recent call last):"))
+	assert.Equal(t, uint64(1<<6|1<<7), maskOf("Unhandled exception. "))
+	assert.Equal(t, uint64(1<<8), maskOf("Error)"))
 }
 
 // TestPrefilterTooManyTransitions verifies that more than 64 start
