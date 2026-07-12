@@ -146,21 +146,15 @@ func (matcher) Format(int) string { return "cri" }
 
 // Next receives each rejoined application line: the key it was added under
 // (suffixed "/stdout" or "/stderr"), the line with CRI prefixes stripped, and
-// the timestamp of its first fragment. The AddAt method of a
-// multiline.Aggregator satisfies Next directly.
+// the timestamp of its first fragment (zero for a non-CRI line passed
+// through). The AddAt method of a multiline.Aggregator satisfies Next
+// directly.
 type Next[T any] func(ctx context.Context, key, line string, when time.Time, data T) error
-
-// lineData rides through the internal aggregator alongside each buffered
-// line, so rejoin recovers the first fragment's timestamp without re-parsing.
-type lineData[T any] struct {
-	when time.Time
-	data T
-}
 
 // Aggregator rejoins CRI partial lines. Like multiline.Aggregator it is not
 // safe for concurrent use.
 type Aggregator[T any] struct {
-	inner *multiline.Aggregator[lineData[T]]
+	inner *multiline.Aggregator[T]
 	next  Next[T]
 
 	// Cached "<key>/<stream>" strings for the previous key, so the steady
@@ -184,8 +178,7 @@ func New[T any](next Next[T], opts ...multiline.Option) *Aggregator[T] {
 // Add feeds one raw CRI log line. The key identifies the source (typically
 // the container); fragment runs are buffered per key and stream, and rejoined
 // lines are handed to the [Next] stage keyed "<key>/<stream>". A line that is
-// not CRI-formatted is passed through unmodified, stamped with the current
-// time.
+// not CRI-formatted is passed through unmodified with a zero time.
 func (a *Aggregator[T]) Add(ctx context.Context, key, raw string, data T) error {
 	l, ok := Parse(raw)
 	return a.AddParsed(ctx, key, raw, l, ok, data)
@@ -193,19 +186,22 @@ func (a *Aggregator[T]) Add(ctx context.Context, key, raw string, data T) error 
 
 // AddParsed is [Aggregator.Add] for callers that already parsed raw — for
 // example to derive the key or to filter by stream. It skips the internal
-// [Parse], so the line's timestamp is parsed exactly once on the whole path
-// (the buffering, grouping and rejoining stages use a cheap structural split
-// that never re-parses it). line and ok must be the [Parse] results of raw;
-// ok false feeds raw through unmodified as a non-CRI line, stamped with the
-// current time.
+// [Parse], so the line's timestamp is parsed exactly once on the whole path;
+// a full line with no fragments pending skips buffering entirely and goes
+// straight to the [Next] stage. line and ok must be the [Parse] results of
+// raw; ok false feeds raw through unmodified as a non-CRI line with a zero
+// time.
 func (a *Aggregator[T]) AddParsed(ctx context.Context, key, raw string, line Line, ok bool, data T) error {
 	if !ok {
-		return a.next(ctx, key, raw, time.Now(), data)
+		return a.next(ctx, key, raw, time.Time{}, data)
 	}
 	if key != "" {
 		key = a.streamKey(key, line.Stream)
 	}
-	return a.inner.AddAt(ctx, key, raw, line.Time, lineData[T]{when: line.Time, data: data})
+	if !line.Partial && !a.inner.Pending(key) {
+		return a.next(ctx, key, line.Content, line.Time, data)
+	}
+	return a.inner.AddAt(ctx, key, raw, line.Time, data)
 }
 
 // streamKey returns "<key>/<stream>", cached for the previous key so repeated
@@ -227,16 +223,16 @@ func (a *Aggregator[T]) streamKey(key, stream string) string {
 }
 
 // rejoin receives buffered raw lines from the inner aggregator — a completed
-// fragment run, or a single line — and forwards the stripped, concatenated
-// content, stamped with the first line's timestamp.
-func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[lineData[T]]) error {
+// fragment run, or a flushed dangling fragment — and forwards the stripped,
+// concatenated content, stamped with the first line's timestamp (Entry.When).
+func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[T]) error {
 	if !strings.Contains(e.Text, "\n") {
 		if _, _, content, ok := meta(e.Text); ok {
-			return a.next(ctx, e.Key, content, e.Data.when, e.Data.data)
+			return a.next(ctx, e.Key, content, e.When, e.Data)
 		}
 		// Cannot happen for lines admitted through Add/AddParsed; keep the
 		// text rather than dropping it.
-		return a.next(ctx, e.Key, e.Text, e.Data.when, e.Data.data)
+		return a.next(ctx, e.Key, e.Text, e.When, e.Data)
 	}
 
 	var text strings.Builder
@@ -247,12 +243,15 @@ func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[lineData[T
 			text.WriteString(fragment)
 		}
 	}
-	return a.next(ctx, e.Key, text.String(), e.Data.when, e.Data.data)
+	return a.next(ctx, e.Key, text.String(), e.When, e.Data)
 }
 
-// Flush hands any pending fragments of key's streams to the next stage. Call
-// it when the source ends, e.g. when the container terminates; note that a
-// run flushed without its closing "F" line is passed on line by line.
+// Flush hands any pending fragments of key's stdout and stderr streams to
+// the next stage. Call it when the source ends, e.g. when the container
+// terminates; note that a run flushed without its closing "F" line is passed
+// on line by line. Runs fed via [Aggregator.AddParsed] with a non-standard
+// Line.Stream are not covered — flush those with [Aggregator.FlushBefore] or
+// [Aggregator.Stop].
 func (a *Aggregator[T]) Flush(ctx context.Context, key string) error {
 	for _, k := range []string{key + "/stdout", key + "/stderr"} {
 		if err := a.inner.Flush(ctx, k); err != nil {
@@ -273,4 +272,15 @@ func (a *Aggregator[T]) FlushBefore(ctx context.Context, t time.Time) error {
 // reusable. Stop any downstream stage afterwards.
 func (a *Aggregator[T]) Stop(ctx context.Context) error {
 	return a.inner.Stop(ctx)
+}
+
+// Len returns the number of streams with buffered fragments.
+func (a *Aggregator[T]) Len() int {
+	return a.inner.Len()
+}
+
+// Bytes returns the total raw bytes currently buffered — a cheap gauge for
+// memory monitoring.
+func (a *Aggregator[T]) Bytes() int {
+	return a.inner.Bytes()
 }

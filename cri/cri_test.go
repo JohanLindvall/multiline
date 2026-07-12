@@ -145,9 +145,9 @@ func TestNextErrors(t *testing.T) {
 func TestRejoinDefensive(t *testing.T) {
 	a, got := pipeline(t)
 	ctx := context.Background()
-	assert.NoError(t, a.rejoin(ctx, multiline.Entry[lineData[int]]{Text: "plain", Key: "k", Data: lineData[int]{data: 1}}))
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "plain", Key: "k", Data: 1}))
 	assert.Equal(t, received{"k", "plain", time.Time{}, 1}, (*got)[0])
-	assert.NoError(t, a.rejoin(ctx, multiline.Entry[lineData[int]]{Text: "one\ntwo", Key: "k", Data: lineData[int]{data: 2}}))
+	assert.NoError(t, a.rejoin(ctx, multiline.Entry[int]{Text: "one\ntwo", Key: "k", Data: 2}))
 	assert.Equal(t, received{"k", "onetwo", time.Time{}, 2}, (*got)[1])
 }
 
@@ -264,4 +264,21 @@ func TestChainsIntoMultiline(t *testing.T) {
 		"\ngoroutine 1 [running]:\nmain.handler(0x0)\n\t/app/main.go:42 +0x1d", entries[0].Text)
 	assert.Equal(t, 5, entries[0].Lines)
 	assert.Equal(t, 0, entries[0].Data)
+}
+
+// TestIntrospection verifies the Len/Bytes gauges over the fragment buffer.
+func TestIntrospection(t *testing.T) {
+	a, _ := pipeline(t)
+	ctx := context.Background()
+	assert.Zero(t, a.Len())
+	assert.Zero(t, a.Bytes())
+
+	raw := "2024-01-01T10:00:00.000000001Z stdout P frag"
+	assert.NoError(t, a.Add(ctx, "c1", raw, 0))
+	assert.Equal(t, 1, a.Len())
+	assert.Equal(t, len(raw), a.Bytes())
+
+	assert.NoError(t, a.Stop(ctx))
+	assert.Zero(t, a.Len())
+	assert.Zero(t, a.Bytes())
 }

@@ -121,7 +121,7 @@ func TestPrefilterDifferential(t *testing.T) {
 	filtered := MustCompile(All...)
 	assert.NotNil(t, filtered.StartLiterals())
 	unfiltered := *filtered
-	unfiltered.startLiterals = nil
+	unfiltered.pf = nil
 
 	lines := []string{
 		"",
@@ -177,7 +177,7 @@ func BenchmarkStepNoMatch(b *testing.B) {
 	})
 	b.Run("unfiltered", func(b *testing.B) {
 		sm := MustCompile(All...)
-		sm.startLiterals = nil
+		sm.pf = nil
 		b.ReportAllocs()
 		for range b.N {
 			sm.Step(line, start)
@@ -199,4 +199,44 @@ func BenchmarkStepNearMiss(b *testing.B) {
 	for range b.N {
 		sm.Step(line, start)
 	}
+}
+
+// TestPrefilterMasks verifies (white-box) that probe literals select only the
+// start transitions they were derived from, so a near-miss line runs one
+// regex instead of all of them.
+func TestPrefilterMasks(t *testing.T) {
+	sm := MustCompile(All...)
+	assert.NotNil(t, sm.pf)
+
+	maskOf := func(lit string) uint64 {
+		t.Helper()
+		for i, l := range sm.pf.literals {
+			if l == lit {
+				return sm.pf.masks[i]
+			}
+		}
+		t.Fatalf("literal %q not found in %q", lit, sm.pf.literals)
+		return 0
+	}
+
+	// Start-transition order follows the set order in All: go declares
+	// transitions 0-1, java 2, python 3, dotnet 4-5, ruby 6, rust 7, php 8.
+	assert.Equal(t, uint64(1<<0), maskOf("panic: "))
+	assert.Equal(t, uint64(1<<1), maskOf("http: panic serving"))
+	assert.Equal(t, uint64(1<<2), maskOf("Error:"))
+	assert.Equal(t, uint64(1<<3), maskOf("Traceback (most recent call last):"))
+	assert.Equal(t, uint64(1<<4|1<<5), maskOf("Unhandled exception. "))
+	assert.Equal(t, uint64(1<<6), maskOf("Error)"))
+}
+
+// TestPrefilterTooManyTransitions verifies that more than 64 start
+// transitions disable the prefilter (the candidate masks are 64-bit).
+func TestPrefilterTooManyTransitions(t *testing.T) {
+	start := State{Name: StartState}
+	for range 65 {
+		start.Transitions = append(start.Transitions, Transition{Pattern: `longliteral`, Next: "s"})
+	}
+	sm, err := Compile(StateSet{Name: "big", States: []State{start, {Name: "s"}}})
+	assert.NoError(t, err)
+	assert.Nil(t, sm.StartLiterals())
 }

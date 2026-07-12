@@ -43,6 +43,7 @@ receives an `Entry`:
 | `Text`      | The entry text; aggregated source lines are joined by `"\n"`. |
 | `Key`       | The key the lines were added under. |
 | `Match`     | Name of the format that aggregated the entry (`"go"`, `"java"`, …), or `""` for a line passed through as-is. |
+| `When`      | Time of the entry's first source line, as passed to `AddAt` (zero for lines fed via `Add`). |
 | `Data`      | The `T` value passed to `Add` with the entry's first source line. |
 | `Lines`     | Number of source lines the entry represents (including lines dropped by the size caps). |
 | `Truncated` | Set when the size caps dropped or cut lines belonging to this entry. |
@@ -98,15 +99,19 @@ The runnable version lives in [examples/simple](examples/simple/main.go)
 
 - `New[T](emit, opts...)` — create an aggregator. Defaults to the built-in
   matcher covering `patterns.All`; pass `WithMatcher` to change it.
-- `Add(ctx, key, line, data)` — feed one line, stamped with the current time.
-  An empty key bypasses aggregation and emits immediately.
-- `AddAt(ctx, key, line, when, data)` — like `Add` with an explicit time.
-  Pass the log's own timestamp to make `FlushBefore` robust when replaying
-  old logs.
+- `Add(ctx, key, line, data)` — feed one line. An empty key bypasses
+  aggregation and emits immediately.
+- `AddAt(ctx, key, line, when, data)` — like `Add` with an explicit time,
+  which `FlushBefore` compares against and `Entry.When` reports. Pass the
+  log's own timestamp to make time-based flushing robust when replaying old
+  logs.
 - `Flush(ctx, key)` — emit the pending group for one key. Call it when a
   stream ends, e.g. when its container terminates.
 - `FlushBefore(ctx, t)` — emit pending groups last touched before `t`.
 - `Stop(ctx)` — flush everything (oldest first) and reset for reuse.
+- `Pending(key)`, `Len()`, `Bytes()` — cheap gauges for monitoring: whether a
+  key has buffered lines, how many keys do, and the total buffered text
+  bytes.
 
 ### Buffering latency
 
@@ -211,10 +216,10 @@ err := logs.Add(ctx, containerID, rawLine, data)
 ```
 
 `cri.New` accepts the same `WithMaxLines` / `WithMaxBytes` / `WithMaxGroups`
-options to bound fragment buffering, and has its own `Flush`, `FlushBefore`
-and `Stop` (stop the upstream stage first). Lines that are not CRI-formatted
-pass through unmodified, and `cri.Parse` is exported for callers that need
-the pieces. A tailer that already parses each line (to derive the key, or to
+options to bound fragment buffering, and has its own `Flush`, `FlushBefore`,
+`Stop` (stop the upstream stage first) and `Len` / `Bytes` gauges. Lines that
+are not CRI-formatted pass through unmodified with a zero time, and
+`cri.Parse` is exported for callers that need the pieces. A tailer that already parses each line (to derive the key, or to
 route by stream) should feed the parse result to `AddParsed` instead of
 `Add` — the timestamp is then parsed exactly once per line on the whole
 path, roughly halving the per-line cost. Its `(line, ok)` parameters mirror

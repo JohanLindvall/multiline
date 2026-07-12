@@ -30,6 +30,10 @@ type Entry[T any] struct {
 	// name such as "go" or "java"). It is "" when the line passed through
 	// as-is.
 	Match string
+	// When is the time of the entry's first source line, as passed to AddAt.
+	// Lines fed without a time (Add, or AddAt with a zero when) carry a zero
+	// When.
+	When time.Time
 	// Data is the value passed to Add for the entry's first source line.
 	Data T
 	// Lines is the number of source lines the entry represents. It counts
@@ -55,7 +59,10 @@ type Matcher interface {
 	// Step applies line to the active states and returns the new active set,
 	// plus the index of an accepting state the line landed in (-1 if none).
 	// An empty next means line does not continue any active state. Step must
-	// not retain or modify the active slice.
+	// not retain or modify the active slice; the aggregator retains the
+	// returned slice until the group's next line, so implementations must
+	// return slices they will never mutate (shared immutable slices are
+	// fine).
 	Step(line string, active []int) (next []int, accepted int)
 	// Format returns the format name reported as [Entry].Match for a group
 	// that completed in the state at index.
@@ -69,6 +76,12 @@ var defaultMatcher Matcher = patterns.MustCompile(patterns.All...)
 // startStates is the active set a new group is matched from.
 var startStates = []int{0}
 
+// lineAux rides alongside each retained line of a group.
+type lineAux[T any] struct {
+	when time.Time
+	data T
+}
+
 // group buffers the pending lines of one key.
 type group[T any] struct {
 	prev, next *group[T]
@@ -76,7 +89,7 @@ type group[T any] struct {
 	when       time.Time
 
 	lines  []string
-	data   []T
+	aux    []lineAux[T]
 	bytes  int
 	total  int // lines consumed, including ones dropped by the caps
 	capped bool
@@ -102,6 +115,7 @@ type Aggregator[T any] struct {
 
 	groups      map[string]*group[T]
 	first, last *group[T] // groups in last-touched order
+	bytes       int       // text bytes retained across all groups
 
 	maxLines  int
 	maxBytes  int
@@ -143,8 +157,9 @@ func WithMaxBytes(n int) Option {
 
 // WithMaxGroups caps the number of keys with pending lines. Adding a line for
 // a new key beyond the cap flushes the least recently touched group first. A
-// value <= 0 means unlimited. This guards against unbounded key cardinality;
-// time-based flushing is [Aggregator.FlushBefore].
+// value <= 0 means unlimited. This guards against unbounded key cardinality
+// (note that Go maps keep their high-water bucket memory, so the cap also
+// bounds that); time-based flushing is [Aggregator.FlushBefore].
 func WithMaxGroups(n int) Option {
 	return func(c *config) { c.maxGroups = n }
 }
@@ -175,34 +190,39 @@ func New[T any](emit Emitter[T], opts ...Option) *Aggregator[T] {
 	}
 }
 
-// Add feeds a single line into the aggregator, stamped with the current time.
-// The key groups related lines and is typically a container or stream id; an
-// empty key bypasses aggregation and emits the line immediately. data rides
-// along with the line and is handed back through the emitter. Add returns the
-// first error produced by the emitter, if any.
+// Add feeds a single line into the aggregator. The key groups related lines
+// and is typically a container or stream id; an empty key bypasses
+// aggregation and emits the line immediately. data rides along with the line
+// and is handed back through the emitter. Add returns the first error
+// produced by the emitter, if any. Entries fed via Add carry a zero
+// [Entry].When; staleness for [Aggregator.FlushBefore] is tracked with the
+// aggregator clock only when a line is actually buffered, keeping the
+// pass-through path free of clock reads.
 func (a *Aggregator[T]) Add(ctx context.Context, key, line string, data T) error {
-	return a.AddAt(ctx, key, line, a.now(), data)
+	return a.AddAt(ctx, key, line, time.Time{}, data)
 }
 
-// AddAt is [Aggregator.Add] with an explicit arrival time, which
-// [Aggregator.FlushBefore] compares against — pass the log's own timestamp to
-// make time-based flushing robust when replaying old logs. Times are assumed
-// to be non-decreasing across calls.
+// AddAt is [Aggregator.Add] with an explicit time for the line, which
+// [Aggregator.FlushBefore] compares against and [Entry].When reports — pass
+// the log's own timestamp to make time-based flushing robust when replaying
+// old logs. Times are assumed to be non-decreasing across calls. A zero when
+// is allowed (Add uses one): staleness falls back to the aggregator clock and
+// Entry.When stays zero.
 func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.Time, data T) error {
 	if key == "" {
-		return a.emit(ctx, Entry[T]{Text: line, Lines: 1, Data: data})
+		return a.emit(ctx, Entry[T]{Text: line, When: when, Lines: 1, Data: data})
 	}
 
 	if g := a.groups[key]; g != nil {
 		if next, accepted := a.matcher.Step(line, g.active); len(next) > 0 {
-			a.append(g, line, data)
+			a.append(g, line, when, data)
 			g.active = next
 			if accepted >= 0 {
 				g.match = a.matcher.Format(accepted)
 				g.acceptedLines = len(g.lines)
 				g.acceptedTotal = g.total
 			}
-			g.when = when
+			g.when = a.stamp(when)
 			a.moveLast(g)
 			return nil
 		}
@@ -216,13 +236,13 @@ func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.T
 
 	next, _ := a.matcher.Step(line, startStates)
 	if len(next) == 0 {
-		return a.emit(ctx, Entry[T]{Text: line, Key: key, Lines: 1, Data: data})
+		return a.emit(ctx, Entry[T]{Text: line, Key: key, When: when, Lines: 1, Data: data})
 	}
 
 	// The accepted result is deliberately ignored here: an aggregated entry
 	// must span at least two source lines.
-	g := &group[T]{key: key, when: when, active: next}
-	a.append(g, line, data)
+	g := &group[T]{key: key, when: a.stamp(when), active: next}
+	a.append(g, line, when, data)
 	a.groups[key] = g
 	a.link(g)
 
@@ -235,6 +255,32 @@ func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.T
 	}
 
 	return nil
+}
+
+// stamp resolves the staleness timestamp for a buffered line: the caller's
+// time, or the aggregator clock when none was supplied.
+func (a *Aggregator[T]) stamp(when time.Time) time.Time {
+	if when.IsZero() {
+		return a.now()
+	}
+	return when
+}
+
+// Pending reports whether key has buffered lines.
+func (a *Aggregator[T]) Pending(key string) bool {
+	_, ok := a.groups[key]
+	return ok
+}
+
+// Len returns the number of keys with buffered lines.
+func (a *Aggregator[T]) Len() int {
+	return len(a.groups)
+}
+
+// Bytes returns the total text bytes currently buffered across all groups —
+// a cheap gauge for memory monitoring.
+func (a *Aggregator[T]) Bytes() int {
+	return a.bytes
 }
 
 // Flush emits the pending group for key, if any. Use it when a stream ends,
@@ -285,7 +331,7 @@ func (a *Aggregator[T]) Stop(ctx context.Context) error {
 // matching still advances, so the group's boundary is detected normally. The
 // first line of a group is always retained (possibly cut to ""), so a group
 // is never empty.
-func (a *Aggregator[T]) append(g *group[T], line string, data T) {
+func (a *Aggregator[T]) append(g *group[T], line string, when time.Time, data T) {
 	g.total++
 	if g.capped {
 		return
@@ -316,8 +362,9 @@ func (a *Aggregator[T]) append(g *group[T], line string, data T) {
 	}
 
 	g.lines = append(g.lines, line)
-	g.data = append(g.data, data)
+	g.aux = append(g.aux, lineAux[T]{when: when, data: data})
 	g.bytes += sep + len(line)
+	a.bytes += sep + len(line)
 }
 
 // flush emits g's longest accepted prefix as one aggregated entry and any
@@ -331,7 +378,8 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 			Text:      strings.Join(g.lines[:k], "\n"),
 			Key:       g.key,
 			Match:     g.match,
-			Data:      g.data[0],
+			When:      g.aux[0].when,
+			Data:      g.aux[0].data,
 			Lines:     g.acceptedTotal,
 			Truncated: g.capped,
 		}); err != nil {
@@ -340,7 +388,7 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 	}
 
 	for i := tail; i < len(g.lines); i++ {
-		e := Entry[T]{Text: g.lines[i], Key: g.key, Lines: 1, Data: g.data[i]}
+		e := Entry[T]{Text: g.lines[i], Key: g.key, When: g.aux[i].when, Lines: 1, Data: g.aux[i].data}
 		if tail == 0 && g.capped && i == len(g.lines)-1 {
 			e.Truncated = true
 		}
@@ -368,6 +416,7 @@ func (a *Aggregator[T]) unlink(g *group[T]) {
 	}
 	g.prev = nil
 	g.next = nil
+	a.bytes -= g.bytes
 	delete(a.groups, g.key)
 }
 

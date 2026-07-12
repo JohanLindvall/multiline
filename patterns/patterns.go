@@ -72,10 +72,15 @@ type StateMachine struct {
 	format      []string
 	nonTerminal []bool
 
-	// startLiterals is the literal prefilter for the start state: a line that
-	// contains none of them cannot match any start transition, so Step skips
-	// the regexes. nil disables the prefilter (see StartLiterals).
-	startLiterals []string
+	// singles[i] is the shared, immutable []int{i} that Step returns for
+	// single-state results, so advancing a group allocates nothing.
+	singles [][]int
+
+	// pf is the literal prefilter for the start state: a line that contains
+	// none of its literals cannot match any start transition, and a hit runs
+	// only the transitions that literal implies. nil disables the prefilter
+	// (see StartLiterals).
+	pf *prefilter
 }
 
 // Compile builds a [StateMachine] from the given sets. Each set contributes
@@ -139,8 +144,12 @@ func Compile(sets ...StateSet) (*StateMachine, error) {
 		}
 	}
 
-	if lits, ok := startLiterals(sets); ok {
-		sm.startLiterals = lits
+	if pf, ok := startPrefilter(sets); ok {
+		sm.pf = pf
+	}
+	sm.singles = make([][]int, len(sm.format))
+	for i := range sm.singles {
+		sm.singles[i] = []int{i}
 	}
 
 	return sm, nil
@@ -163,16 +172,22 @@ const maxActiveStates = 20
 // Step implements the multiline.Matcher interface. It applies line to the
 // transitions of the active states and returns the new active set, plus the
 // index of an accepting state the line landed in (-1 if none). An empty next
-// means line does not continue any active state.
+// means line does not continue any active state. The returned slice may be
+// shared across calls; callers must not modify it.
 //
 // When only the start state is active — the steady state of a log stream —
 // lines that cannot possibly begin a group are rejected by the literal
-// prefilter without running any regex (see [StateMachine.StartLiterals]).
+// prefilter without running any regex, and lines that hit a probe literal
+// run only the start transitions that literal implies (see
+// [StateMachine.StartLiterals]).
 func (s *StateMachine) Step(line string, active []int) (next []int, accepted int) {
-	accepted = -1
-	if s.startLiterals != nil && len(active) == 1 && active[0] == 0 && !s.maybeStart(line) {
-		return nil, accepted
+	if s.pf != nil && len(active) == 1 && active[0] == 0 {
+		return s.stepStart(line)
 	}
+
+	accepted = -1
+	var buf [maxActiveStates]int
+	n := 0
 	for _, state := range active {
 		for _, tr := range s.transitions[state] {
 			if !tr.pattern.MatchString(line) {
@@ -181,13 +196,58 @@ func (s *StateMachine) Step(line string, active []int) (next []int, accepted int
 			if accepted < 0 && !s.nonTerminal[tr.next] {
 				accepted = tr.next
 			}
-			if len(next) < maxActiveStates && !slices.Contains(next, tr.next) {
-				next = append(next, tr.next)
+			if n < maxActiveStates && !slices.Contains(buf[:n], tr.next) {
+				buf[n] = tr.next
+				n++
 			}
 		}
 	}
 
-	return
+	return s.result(buf[:n]), accepted
+}
+
+// stepStart is Step for the prefiltered start state: probe literals select
+// the candidate transitions, and only those regexes run.
+func (s *StateMachine) stepStart(line string) (next []int, accepted int) {
+	var mask uint64
+	for i, lit := range s.pf.literals {
+		if strings.Contains(line, lit) {
+			mask |= s.pf.masks[i]
+		}
+	}
+	accepted = -1
+	if mask == 0 {
+		return nil, accepted
+	}
+
+	var buf [maxActiveStates]int
+	n := 0
+	for i, tr := range s.transitions[0] {
+		if mask&(1<<uint(i)) == 0 || !tr.pattern.MatchString(line) {
+			continue
+		}
+		if accepted < 0 && !s.nonTerminal[tr.next] {
+			accepted = tr.next
+		}
+		if n < maxActiveStates && !slices.Contains(buf[:n], tr.next) {
+			buf[n] = tr.next
+			n++
+		}
+	}
+
+	return s.result(buf[:n]), accepted
+}
+
+// result converts a scratch state list into the returned active set, sharing
+// the interned single-state slices for the overwhelmingly common case.
+func (s *StateMachine) result(states []int) []int {
+	switch len(states) {
+	case 0:
+		return nil
+	case 1:
+		return s.singles[states[0]]
+	}
+	return append([]int(nil), states...)
 }
 
 // Format implements the multiline.Matcher interface. It returns the name of
@@ -197,21 +257,16 @@ func (s *StateMachine) Format(index int) string {
 	return s.format[index]
 }
 
-func (s *StateMachine) maybeStart(line string) bool {
-	for _, lit := range s.startLiterals {
-		if strings.Contains(line, lit) {
-			return true
-		}
-	}
-	return false
-}
-
 // StartLiterals returns the literal prefilter derived from the start-state
 // patterns at Compile time: every line that matches any start transition
 // contains at least one of the returned substrings, so lines containing none
-// skip the start regexes entirely. It returns nil when no such set could be
-// proven for every start pattern and the prefilter is disabled — worth
-// checking in a test when start-pattern matching is on your hot path.
+// skip the start regexes entirely (and a hit runs only the transitions the
+// literal implies). It returns nil when no such set could be proven for
+// every start pattern and the prefilter is disabled — worth checking in a
+// test when start-pattern matching is on your hot path.
 func (s *StateMachine) StartLiterals() []string {
-	return slices.Clone(s.startLiterals)
+	if s.pf == nil {
+		return nil
+	}
+	return slices.Clone(s.pf.literals)
 }

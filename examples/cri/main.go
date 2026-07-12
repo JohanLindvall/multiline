@@ -16,23 +16,19 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// Stack-trace aggregation over the rejoined lines. Data carries each
-	// entry's log timestamp, handed over by the CRI stage below.
-	traces := multiline.New(func(_ context.Context, e multiline.Entry[time.Time]) error {
+	// Stack-trace aggregation over the rejoined lines. Entry.When carries
+	// each entry's log timestamp, handed over by the CRI stage below.
+	traces := multiline.New(func(_ context.Context, e multiline.Entry[any]) error {
 		kind := "plain"
 		if e.Match != "" {
 			kind = "stacktrace " + e.Match
 		}
-		fmt.Printf("[%s %s %s]\n%s\n\n", e.Data.Format(time.RFC3339Nano), e.Key, kind, e.Text)
+		fmt.Printf("[%s %s %s]\n%s\n\n", e.When.Format(time.RFC3339Nano), e.Key, kind, e.Text)
 		return nil
 	})
 
-	// The CRI stage in front of it. Passing traces.AddAt directly works too;
-	// the closure additionally stores each line's timestamp as its data so
-	// the emitter above can print it.
-	logs := cri.New(func(ctx context.Context, key, line string, when time.Time, _ any) error {
-		return traces.AddAt(ctx, key, line, when, when)
-	})
+	// The CRI stage in front of it: AddAt is a valid next stage as-is.
+	logs := cri.New(traces.AddAt)
 
 	for _, raw := range []string{
 		"2024-01-01T10:00:00.000000001Z stdout F server started",

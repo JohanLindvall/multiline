@@ -117,3 +117,58 @@ func TestAcceptedPrefixTailError(t *testing.T) {
 		"stack backtrace:",
 	}, texts)
 }
+
+// TestEntryWhen verifies When reporting: aggregated entries carry the first
+// line's AddAt time, tail lines their own, pass-through lines the supplied
+// time, and Add-fed entries a zero When.
+func TestEntryWhen(t *testing.T) {
+	var got []Entry[struct{}]
+	ml := New(func(_ context.Context, e Entry[struct{}]) error {
+		got = append(got, e)
+		return nil
+	})
+	ctx := context.Background()
+	t0 := time.Unix(1000, 0)
+
+	assert.NoError(t, ml.AddAt(ctx, "k", "plain", t0, struct{}{}))
+	assert.NoError(t, ml.AddAt(ctx, "k", "thread 'main' panicked at src/main.rs:5:5:", t0.Add(time.Second), struct{}{}))
+	assert.NoError(t, ml.AddAt(ctx, "k", "boom message", t0.Add(2*time.Second), struct{}{}))
+	assert.NoError(t, ml.AddAt(ctx, "k", "stack backtrace:", t0.Add(3*time.Second), struct{}{}))
+	assert.NoError(t, ml.Stop(ctx))
+	assert.NoError(t, ml.Add(ctx, "k", "added without a time", struct{}{}))
+
+	assert.Len(t, got, 4)
+	assert.Equal(t, t0, got[0].When)                  // pass-through
+	assert.Equal(t, t0.Add(time.Second), got[1].When) // aggregate: first line's
+	assert.Equal(t, "rust", got[1].Match)
+	assert.Equal(t, t0.Add(3*time.Second), got[2].When) // tail line: its own
+	assert.True(t, got[3].When.IsZero(), "Add carries zero When")
+}
+
+// TestIntrospection verifies the Pending/Len/Bytes gauges.
+func TestIntrospection(t *testing.T) {
+	ml := New(func(_ context.Context, _ Entry[struct{}]) error { return nil })
+	ctx := context.Background()
+
+	assert.False(t, ml.Pending("a"))
+	assert.Zero(t, ml.Len())
+	assert.Zero(t, ml.Bytes())
+
+	assert.NoError(t, ml.Add(ctx, "a", "panic: a", struct{}{}))
+	assert.NoError(t, ml.Add(ctx, "b", "panic: bb", struct{}{}))
+	assert.NoError(t, ml.Add(ctx, "b", "", struct{}{})) // continuation: +1 separator byte
+	assert.True(t, ml.Pending("a"))
+	assert.True(t, ml.Pending("b"))
+	assert.False(t, ml.Pending("c"))
+	assert.Equal(t, 2, ml.Len())
+	assert.Equal(t, len("panic: a")+len("panic: bb")+1, ml.Bytes())
+
+	assert.NoError(t, ml.Flush(ctx, "a"))
+	assert.False(t, ml.Pending("a"))
+	assert.Equal(t, 1, ml.Len())
+	assert.Equal(t, len("panic: bb")+1, ml.Bytes())
+
+	assert.NoError(t, ml.Stop(ctx))
+	assert.Zero(t, ml.Len())
+	assert.Zero(t, ml.Bytes())
+}

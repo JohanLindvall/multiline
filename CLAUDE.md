@@ -36,8 +36,8 @@ Use the Makefile (same shape as JohanLindvall/lightning):
   use regex. `cri.Next[T]` is deliberately signature-compatible with
   `(*multiline.Aggregator[T]).AddAt`. The timestamp is parsed at most once
   per line (zero times via `AddParsed`): internal paths use the cheap `meta`
-  split and recover the first fragment's time from the `lineData` wrapper —
-  don't reintroduce `Parse` calls on buffered lines
+  split and recover the first fragment's time from `Entry.When` — don't
+  reintroduce `Parse` calls on buffered lines
 - `tests/<format>/*.txt` — corpus files, the behavioral spec
 
 ## Matcher semantics (the part worth re-reading)
@@ -69,11 +69,21 @@ don't belong there — test those with `WithMatcher` unit tests instead.
 
 - Start-pattern prefilter (`patterns/prefilter.go`): Compile derives literal
   substrings from the start patterns (via regexp/syntax) so non-matching
-  lines skip the regexes entirely. Every start pattern must keep a provable
-  case-sensitive literal of >= 3 bytes, or the prefilter silently disables
-  for the whole machine — `TestBundledPrefilterEnabled` guards this; keep it
-  passing when adding formats. `TestPrefilterDifferential` proves the filter
-  never changes a decision.
+  lines skip the regexes entirely, and each literal carries a bitmask of the
+  start transitions it implies, so a near-miss line (contains "Error:" but
+  matches nothing) runs one candidate regex instead of all of them. Every
+  start pattern must keep a provable case-sensitive literal of >= 3 bytes,
+  or the prefilter silently disables for the whole machine —
+  `TestBundledPrefilterEnabled` guards this; keep it passing when adding
+  formats. `TestPrefilterDifferential` proves the filter never changes a
+  decision.
+- `Entry.When` is "the time you gave AddAt": lines fed via `Add` carry a
+  zero When by design — that keeps the pass-through path free of clock
+  reads (the staleness stamp for `FlushBefore` is taken lazily, only when a
+  line is actually buffered).
+- `cri.AddParsed` fast path: a full line with no pending fragments goes
+  straight to the next stage — it must stay behind the `Pending(key)` check
+  or fragment runs would be reordered against interleaving full lines.
 
 - `Truncated` reporting: when a capped group flushes, the flag is set on the
   aggregated entry if there is one, else on the last individually emitted

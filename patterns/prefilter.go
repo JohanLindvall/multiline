@@ -1,7 +1,9 @@
 package patterns
 
 import (
+	"cmp"
 	"regexp/syntax"
+	"slices"
 	"strings"
 )
 
@@ -9,10 +11,12 @@ import (
 // progress): every log line is tested against every start pattern, several of
 // which are unanchored and scan the whole line ("\bpanic: ", java's
 // ".(Exception|Error|...):"). Compile therefore derives a literal prefilter:
-// a set of substrings such that ANY line matching ANY start pattern must
-// contain at least one of them. Lines containing none (practically all lines)
-// skip the regexes entirely — strings.Contains is SIMD-accelerated and orders
-// of magnitude cheaper.
+// for every start transition, a set of substrings such that any line matching
+// that transition must contain at least one of them. Lines containing none of
+// the (deduplicated) literals skip the regexes entirely — strings.Contains is
+// SIMD-accelerated and orders of magnitude cheaper — and a line that does hit
+// a literal runs only the transitions that literal implies, so a log line
+// containing "Error:" pays one regex, not all of them.
 //
 // The literals are computed from the actual patterns, so a pattern change
 // cannot silently break the implication: if no literal set can be proven for
@@ -20,26 +24,81 @@ import (
 // regexes. Correctness is additionally covered by a differential test over
 // the corpus (TestPrefilterDifferential).
 
-// startLiterals derives the prefilter literal set from every start-state
-// transition of the given sets. ok is false when any pattern's required
-// literals cannot be proven (the prefilter must then be disabled).
-func startLiterals(sets []StateSet) ([]string, bool) {
-	var lits []string
+// prefilter maps probe literals to the start transitions they imply.
+// literals[i] hitting a line marks masks[i]'s bits of transitions[0] as
+// candidates; a line with no hits cannot match any start transition.
+type prefilter struct {
+	literals []string
+	masks    []uint64
+}
+
+// startPrefilter derives the prefilter from every start-state transition of
+// the given sets. ok is false when any pattern's required literals cannot be
+// proven, or there are more than 64 start transitions (the prefilter must
+// then be disabled).
+func startPrefilter(sets []StateSet) (*prefilter, bool) {
+	type probe struct {
+		lit  string
+		mask uint64
+	}
+	var probes []probe
+	index := make(map[string]int)
+	transition := 0
 	for _, set := range sets {
 		for _, st := range set.States {
 			if st.Name != StartState {
 				continue
 			}
 			for _, tr := range st.Transitions {
+				if transition >= 64 {
+					return nil, false
+				}
 				ls, ok := requiredLiterals(tr.Pattern)
 				if !ok {
 					return nil, false
 				}
-				lits = append(lits, ls...)
+				for _, l := range ls {
+					if i, ok := index[l]; ok {
+						probes[i].mask |= 1 << transition
+					} else {
+						index[l] = len(probes)
+						probes = append(probes, probe{lit: l, mask: 1 << transition})
+					}
+				}
+				transition++
 			}
 		}
 	}
-	return dedupeLiterals(lits), len(lits) > 0
+	if len(probes) == 0 {
+		return nil, false
+	}
+
+	// Fold literals that contain a shorter kept literal into it: a line
+	// containing the long probe necessarily contains the short one, so the
+	// long check is redundant — its transitions just become candidates of
+	// the short probe. Shortest-first order makes the fold deterministic.
+	slices.SortStableFunc(probes, func(a, b probe) int {
+		if c := cmp.Compare(len(a.lit), len(b.lit)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.lit, b.lit)
+	})
+	pf := &prefilter{}
+	for _, p := range probes {
+		folded := false
+		for i, kept := range pf.literals {
+			if strings.Contains(p.lit, kept) {
+				pf.masks[i] |= p.mask
+				folded = true
+				break
+			}
+		}
+		if !folded {
+			pf.literals = append(pf.literals, p.lit)
+			pf.masks = append(pf.masks, p.mask)
+		}
+	}
+	return pf, true
 }
 
 // requiredLiterals returns strings such that every match of pattern contains
@@ -209,36 +268,4 @@ func moreSelective(a, b []string) bool {
 		return la > lb
 	}
 	return len(a) < len(b)
-}
-
-// dedupeLiterals removes duplicates and literals that contain another literal
-// (if the shorter one is present the longer check is redundant).
-func dedupeLiterals(lits []string) []string {
-	var out []string
-	for _, l := range lits {
-		redundant := false
-		for _, o := range lits {
-			if o != l && strings.Contains(l, o) {
-				redundant = true // a strictly-contained literal covers l
-				break
-			}
-			if o == l && containsBefore(out, l) {
-				redundant = true
-				break
-			}
-		}
-		if !redundant {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-func containsBefore(out []string, l string) bool {
-	for _, o := range out {
-		if o == l {
-			return true
-		}
-	}
-	return false
 }
