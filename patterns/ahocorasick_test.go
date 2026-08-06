@@ -87,7 +87,11 @@ func TestAhoCorasickDifferential(t *testing.T) {
 	assert.NoError(t, err)
 
 	for _, line := range lines {
-		assert.Equal(t, linearScan(pf.literals, pf.masks, line), ac.scan(line), "line %q", line)
+		want := linearScan(pf.literals, pf.masks, line)
+		assert.Equal(t, want, ac.scan(line), "line %q", line)
+		// The production linear scan skips probes via the parent chain; that
+		// must never change the resulting mask.
+		assert.Equal(t, want, pf.scan(line), "parent-skip scan, line %q", line)
 	}
 }
 

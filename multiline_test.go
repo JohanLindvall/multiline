@@ -15,9 +15,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// corpusFormat maps a corpus directory to the format name every aggregated
+// entry in it must report, so a set that steals another's traces (they share
+// frame shapes) cannot pass unnoticed.
+var corpusFormat = map[string]string{
+	"go":     "go",
+	"java":   "java",
+	"net":    "dotnet",
+	"nodejs": "nodejs",
+	"php":    "php",
+	"python": "python",
+	"ruby":   "ruby",
+	"rust":   "rust",
+	"elixir": "elixir",
+}
+
 // Test_Unit_Multiline runs every file under tests/ through the default
 // matcher. A corpus file's first line lists the expected entry sizes (in
-// source lines, comma-separated); the rest is the log to feed.
+// source lines, comma-separated); the rest is the log to feed. Every
+// aggregated entry must also report its directory's format.
 func Test_Unit_Multiline(t *testing.T) {
 	err := filepath.WalkDir("tests", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -54,11 +70,21 @@ func Test_Unit_Multiline(t *testing.T) {
 				split = split[tmp:]
 			}
 
+			format, ok := corpusFormat[filepath.Base(filepath.Dir(path))]
+			if !ok {
+				t.Fatalf("no expected format for corpus directory of %s", path)
+			}
+
 			var actualLineCounts []int
 			var actualLines []string
 			ml := New(func(_ context.Context, e Entry[struct{}]) error {
 				actualLines = append(actualLines, e.Text)
 				actualLineCounts = append(actualLineCounts, e.Lines)
+				if e.Lines > 1 {
+					assert.Equal(t, format, e.Match, "aggregated entry %q", e.Text)
+				} else {
+					assert.Empty(t, e.Match, "pass-through entry %q", e.Text)
+				}
 				return nil
 			})
 			for _, line := range bytes.Split(file, []byte("\n")) {

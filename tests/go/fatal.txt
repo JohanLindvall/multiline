@@ -1,0 +1,7 @@
+5,1
+fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan receive]:
+main.main()
+	/app/main.go:7 +0x1c
+exit status 2

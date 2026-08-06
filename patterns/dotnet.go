@@ -10,24 +10,28 @@ var dotnetBody = []Transition{
 	{Pattern: `^   --- End of inner exception stack trace ---$`, Next: "mark"},
 }
 
-// DotNet matches .NET unhandled-exception stack traces. The exception
-// message may span one extra line before the frames start ("cont"); the
-// double transition out of the start state keeps both readings alive until
-// a frame line decides.
+// DotNet matches .NET unhandled-exception stack traces. The exception message
+// may span one extra line before the frames start, so "message" keeps both
+// readings alive: `.+` consumes that extra line, while the body transitions
+// let a frame follow the header directly.
+//
+// DotNet precedes [Java] in [All] deliberately. .NET's "   at " frames also
+// match Java's frame pattern, and Match reports the format of the last
+// accepting line, so a trace with no .NET-only marker line (no " ---> " inner
+// exception, no "--- End of ... ---") would otherwise be reported as "java".
 var DotNet = StateSet{Name: "dotnet", States: []State{
 	{
 		Name: StartState,
 		Transitions: []Transition{
 			{Pattern: `^Unhandled exception\. .+Exception`, Next: "message"},
-			{Pattern: `^Unhandled exception\. .+Exception`, Next: "cont"},
 		},
 	},
 	{
 		Name:        "message",
 		NonTerminal: true,
-		Transitions: []Transition{
+		Transitions: append([]Transition{
 			{Pattern: `.+`, Next: "cont"},
-		},
+		}, dotnetBody...),
 	},
 	{Name: "cont", NonTerminal: true, Transitions: dotnetBody},
 	{Name: "frame", Transitions: dotnetBody},

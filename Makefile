@@ -23,10 +23,13 @@ test:
 bench:
 	go test -run='^$$' -bench=. -benchmem ./...
 
-# Run the conservation fuzzer (no line lost, duplicated, or reordered) for a
-# short bounded burst; CI-friendly. Leave -fuzztime off for a long local hunt.
+# Run the conservation fuzzers — uncapped (no line lost, duplicated, or
+# reordered) and capped (Lines accounting and truncation flagging under
+# WithMaxLines/WithMaxBytes) — for short bounded bursts; CI-friendly. Drop
+# -fuzztime for a long local hunt.
 fuzz:
-	go test -fuzz=FuzzConservation -fuzztime=30s .
+	go test -fuzz='^FuzzConservation$$' -fuzztime=30s .
+	go test -fuzz='^FuzzCappedConservation$$' -fuzztime=30s .
 
 # Force-install the latest version of each developer tool. Unlike a file target,
 # a phony recipe runs every time, so @latest is actually re-fetched.

@@ -1,0 +1,8 @@
+6,1
+SIGQUIT: quit
+PC=0x46b3a1 m=0 sigcode=0
+
+goroutine 0 [idle]:
+runtime.mcall()
+	/usr/local/go/src/runtime/asm_amd64.s:459 +0x5b
+2024-11-19 11:00:01 INFO shutting down

@@ -15,7 +15,13 @@ var Python = StateSet{Name: "python", States: []State{
 		Transitions: []Transition{
 			{Pattern: `^  File `, Next: "frames"},
 			{Pattern: `^    `, Next: "frames"},
-			{Pattern: `^([a-zA-Z0-9]+\.)*[a-zA-Z0-9]+Error:`, Next: "error"},
+			// The line closing a traceback is the exception's qualified class
+			// name, with a message after a colon or nothing at all — it is not
+			// always a "...Error" (Exception, KeyboardInterrupt, SystemExit,
+			// StopIteration, socket.timeout). Matching the shape rather than a
+			// suffix list keeps the whole traceback in one entry. This is not a
+			// start pattern, so loosening it costs the prefilter nothing.
+			{Pattern: `^([A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*(:|$)`, Next: "error"},
 		},
 	},
 	{

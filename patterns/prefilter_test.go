@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,35 +69,48 @@ func TestRequiredLiterals(t *testing.T) {
 	}
 }
 
-// TestStartLiteralsDedupe verifies that duplicate probes and probes containing
-// another probe are dropped.
+// TestStartLiteralsDedupe verifies probe consolidation: exact duplicates share
+// one probe, a longer probe folds into a shorter contained one only when that
+// costs no precision (no new transitions implied), and a containing probe that
+// is kept for precision is scan-skipped via its parent when the stem misses.
 func TestStartLiteralsDedupe(t *testing.T) {
 	sm := MustCompile(StateSet{Name: "a", States: []State{
 		{Name: StartState, Transitions: []Transition{
-			{Pattern: `foobar`, Next: "s"},
-			{Pattern: `xxfoobarxx`, Next: "s"}, // contains "foobar": redundant
-			{Pattern: `foobar!`, Next: "s"},    // contains "foobar": redundant
-			{Pattern: `foobar`, Next: "t"},     // exact duplicate
+			{Pattern: `foobar(!|)`, Next: "s"}, // {"foobar!", "foobar"}: same transition, "foobar!" folds
+			{Pattern: `foobar`, Next: "t"},     // exact duplicate literal: same probe, mask union
+			{Pattern: `xxfoobarxx`, Next: "u"}, // contains "foobar" but implies a new transition: kept
 		}},
 		{Name: "s"},
 		{Name: "t"},
+		{Name: "u"},
 	}})
-	assert.Equal(t, []string{"foobar"}, sm.StartLiterals())
+	assert.Equal(t, []string{"foobar", "xxfoobarxx"}, sm.StartLiterals())
+	assert.Equal(t, []uint64{1<<0 | 1<<1, 1 << 2}, sm.pf.masks)
+	assert.Equal(t, []int16{-1, 0}, sm.pf.parents, `"xxfoobarxx" is skipped when "foobar" misses`)
 }
 
 // TestBundledPrefilterEnabled guards the bundled sets: a new start pattern
-// without a provable literal would silently disable the prefilter for
-// everyone.
+// without a provable literal falls back to running on every line, and one
+// that cannot be probed at all would disable the prefilter for everyone.
 func TestBundledPrefilterEnabled(t *testing.T) {
-	lits := MustCompile(All...).StartLiterals()
+	sm := MustCompile(All...)
+	lits := sm.StartLiterals()
 	assert.NotEmpty(t, lits)
 	for _, l := range lits {
 		assert.GreaterOrEqual(t, len(l), 3, "weak probe %q", l)
 	}
-	// The product expansion must keep the trailing colon: without it, every
-	// lowercase "error" log line would fall through to the regexes.
-	assert.Contains(t, lits, "Error:")
+	// Every bundled start pattern must stay narrowable; a fallback here costs
+	// every line of every stream a regex.
+	assert.Empty(t, sm.UnfilteredStarts())
 	assert.Contains(t, lits, "panic: ")
+	assert.Contains(t, lits, "fatal error: ")
+	// Java's message-less headline cannot reach a colon, so the bare word
+	// "Error" is the strongest probe provable for it — but it must imply only
+	// that cheap anchored pattern, not absorb the "Error:" probes of the
+	// expensive unanchored headline: precision is what keeps a line merely
+	// containing "Error" from running that regex.
+	assert.Contains(t, lits, "Error")
+	assert.Contains(t, lits, "Error:")
 }
 
 // TestCompileWithoutProvableLiterals verifies that an unprovable start
@@ -108,6 +122,7 @@ func TestCompileWithoutProvableLiterals(t *testing.T) {
 	}})
 	assert.NoError(t, err)
 	assert.Nil(t, sm.StartLiterals())
+	assert.Nil(t, sm.UnfilteredStarts(), "with no prefilter at all there is nothing to report")
 
 	next, accepted := sm.Step("HEADER", []int{0})
 	assert.NotEmpty(t, next)
@@ -134,6 +149,11 @@ func TestPrefilterDifferential(t *testing.T) {
 		"the word panic: mid-line",
 		"http: panic serving 1.2.3.4: boom",
 		"Unhandled exception happened",
+		"java.lang.NullPointerException",
+		`Exception in thread "main" java.lang.NullPointerException`,
+		"an Error without any colon after it",
+		"fatal error: concurrent map writes",
+		"** (RuntimeError) boom",
 		"thread 'main' panicked at src/main.rs:5:5:",
 		"PHP Fatal error:  Uncaught Exception: x in /a.php:1",
 		"main.rb:4:in `foo': boom (NoMethodError)",
@@ -219,27 +239,110 @@ func TestPrefilterMasks(t *testing.T) {
 		return 0
 	}
 
+	parentOf := func(lit string) string {
+		t.Helper()
+		for i, l := range sm.pf.literals {
+			if l == lit {
+				if p := sm.pf.parents[i]; p >= 0 {
+					return sm.pf.literals[p]
+				}
+				return ""
+			}
+		}
+		t.Fatalf("literal %q not found in %q", lit, sm.pf.literals)
+		return ""
+	}
+
 	// Start-transition order follows the set order in All: go declares
-	// transitions 0-1, java 2, nodejs 3-4, python 5, dotnet 6-7, ruby 8,
-	// rust 9, php 10. The nodejs "Error: " probe folds into java's shorter
-	// "Error:", so that literal implies both sets' transitions.
+	// transitions 0-3, dotnet 4, java 5-7, nodejs 8-9, python 10, ruby 11,
+	// rust 12, php 13, elixir 14. Folding is subset-only, so the probes of
+	// java's expensive unanchored headline ("Error:") stay separate from the
+	// bare-word probes of its anchored message-less headline ("Error"); the
+	// scan instead skips the longer probe via its parent when the stem misses.
 	assert.Equal(t, uint64(1<<0), maskOf("panic: "))
-	assert.Equal(t, uint64(1<<1), maskOf("http: panic serving"))
-	assert.Equal(t, uint64(1<<2|1<<3), maskOf("Error:"))
-	assert.Equal(t, uint64(1<<4), maskOf("V8 errors stack trace:"))
-	assert.Equal(t, uint64(1<<5), maskOf("Traceback (most recent call last):"))
-	assert.Equal(t, uint64(1<<6|1<<7), maskOf("Unhandled exception. "))
-	assert.Equal(t, uint64(1<<8), maskOf("Error)"))
+	assert.Equal(t, uint64(1<<1), maskOf("fatal error: "))
+	assert.Equal(t, uint64(1<<2), maskOf("http: panic serving"))
+	assert.Equal(t, uint64(1<<3), maskOf("SIGQUIT: "))
+	assert.Equal(t, uint64(1<<4), maskOf("Unhandled exception. "))
+	assert.Equal(t, uint64(1<<5), maskOf("Error:"))
+	assert.Equal(t, uint64(1<<5), maskOf("Exception:"))
+	assert.Equal(t, uint64(1<<5), maskOf("Throwable:"))
+	assert.Equal(t, uint64(1<<6), maskOf("Error"))
+	assert.Equal(t, uint64(1<<6), maskOf("Exception"))
+	assert.Equal(t, uint64(1<<6), maskOf("Throwable"))
+	assert.Equal(t, uint64(1<<7), maskOf(`Exception in thread "`))
+	assert.Equal(t, uint64(1<<8), maskOf("Error: "))
+	assert.Equal(t, uint64(1<<9), maskOf("V8 errors stack trace:"))
+	assert.Equal(t, uint64(1<<10), maskOf("Traceback (most recent call last):"))
+	assert.Equal(t, uint64(1<<11), maskOf("Error)"))
+	assert.Equal(t, uint64(1<<11), maskOf("Exception)"))
+	assert.Equal(t, uint64(1<<12), maskOf("' panicked at "))
+	assert.Equal(t, uint64(1<<13), maskOf("Fatal error:"))
+	assert.Equal(t, uint64(1<<14), maskOf("** ("))
+	assert.Zero(t, sm.pf.always)
+	assert.False(t, sm.pf.wide)
+
+	// The parent chain restores the effective probe count: every "Error"-,
+	// "Exception"- and "Throwable"-stemmed probe is skipped when its stem is
+	// absent, so a typical line pays for the stems only.
+	assert.Equal(t, "Error", parentOf("Error:"))
+	assert.Equal(t, "Error", parentOf("Error: "))
+	assert.Equal(t, "Error", parentOf("Error)"))
+	assert.Equal(t, "Exception", parentOf("Exception:"))
+	assert.Equal(t, "Exception", parentOf("Exception)"))
+	assert.Equal(t, "Exception", parentOf(`Exception in thread "`))
+	assert.Equal(t, "Throwable", parentOf("Throwable:"))
+	assert.Equal(t, "", parentOf("panic: "))
+	assert.Equal(t, "", parentOf("Unhandled exception. "), "case-sensitive: no parent")
 }
 
-// TestPrefilterTooManyTransitions verifies that more than 64 start
-// transitions disable the prefilter (the candidate masks are 64-bit).
+// TestPrefilterDegrades verifies that a start pattern with no provable literal
+// costs only itself: it becomes a permanent candidate while every other
+// pattern keeps filtering, and decisions are unchanged.
+func TestPrefilterDegrades(t *testing.T) {
+	mine := StateSet{Name: "mine", States: []State{
+		{Name: StartState, Transitions: []Transition{{Pattern: `^[A-Z]+\d+ `, Next: "a"}}},
+		{Name: "a", Transitions: []Transition{{Pattern: `^\s`, Next: "a"}}},
+	}}
+	sm := MustCompile(append(append([]StateSet(nil), All...), mine)...)
+
+	assert.Equal(t, []string{`^[A-Z]+\d+ `}, sm.UnfilteredStarts())
+	assert.Subset(t, sm.StartLiterals(), []string{"panic: "}, "bundled probes survive")
+	assert.NotZero(t, sm.pf.always, "the unprovable transition is always a candidate")
+
+	unfiltered := *sm
+	unfiltered.pf = nil
+	for _, line := range []string{
+		"", "HEADER1 boom", "HEADER boom", "panic: x", "ordinary log line", "ABC12 x",
+	} {
+		gotNext, gotAccepted := sm.Step(line, []int{0})
+		wantNext, wantAccepted := unfiltered.Step(line, []int{0})
+		assert.Equal(t, wantNext, gotNext, "line %q", line)
+		assert.Equal(t, wantAccepted, gotAccepted, "line %q", line)
+	}
+}
+
+// TestPrefilterTooManyTransitions verifies that start transitions past the
+// 64th — which no candidate mask can address — always run, while the first 64
+// keep filtering.
 func TestPrefilterTooManyTransitions(t *testing.T) {
 	start := State{Name: StartState}
-	for range 65 {
-		start.Transitions = append(start.Transitions, Transition{Pattern: `longliteral`, Next: "s"})
+	for i := range 66 {
+		start.Transitions = append(start.Transitions,
+			Transition{Pattern: fmt.Sprintf(`literal%02d`, i), Next: "s"})
 	}
 	sm, err := Compile(StateSet{Name: "big", States: []State{start, {Name: "s"}}})
 	assert.NoError(t, err)
-	assert.Nil(t, sm.StartLiterals())
+	assert.Len(t, sm.StartLiterals(), 64)
+	assert.Equal(t, []string{`literal64`, `literal65`}, sm.UnfilteredStarts())
+	assert.True(t, sm.pf.wide)
+
+	unfiltered := *sm
+	unfiltered.pf = nil
+	for _, line := range []string{"", "nothing here", "literal00 x", "x literal64", "literal65"} {
+		gotNext, gotAccepted := sm.Step(line, []int{0})
+		wantNext, wantAccepted := unfiltered.Step(line, []int{0})
+		assert.Equal(t, wantNext, gotNext, "line %q", line)
+		assert.Equal(t, wantAccepted, gotAccepted, "line %q", line)
+	}
 }

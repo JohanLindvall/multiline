@@ -4,8 +4,22 @@ package patterns
 // matches Node.js errors with an error-class prefix ("TypeError: ..."),
 // whose frame lines share the Java "at ..." shape; bare "Error:" headlines
 // and the V8 marker are covered by the [NodeJS] set.
+//
+// The last two transitions cover an exception thrown without a message, whose
+// headline ends at the class name with no colon to anchor on. Both demand a
+// dotted package qualifier, so ordinary prose ending in "...Error" does not
+// open a group, and both are anchored: the equivalent unanchored pattern costs
+// ~2.4us per line against ~35ns for these, because the prefilter can only
+// prove the bare words "Exception"/"Error"/"Throwable" for them and every line
+// carrying one of those words has to run them.
+// javaClass is a package-qualified throwable class name ending the line, the
+// shape a message-less headline finishes with.
+const javaClass = `([a-zA-Z_$][a-zA-Z0-9_$]*\.)+[A-Z][A-Za-z0-9_$]*(Exception|Error|Throwable)$`
+
 var javaHeader = []Transition{
 	{Pattern: `.(Exception|Error|Throwable):`, Next: "after_exception"},
+	{Pattern: `^` + javaClass, Next: "after_exception"},
+	{Pattern: `^Exception in thread "[^"]*" ` + javaClass, Next: "after_exception"},
 }
 
 // javaFrames continues a stack trace body.

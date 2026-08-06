@@ -44,7 +44,9 @@ type Entry[T any] struct {
 	Data T
 	// Lines is the number of source lines the entry represents. It counts
 	// lines dropped by WithMaxLines/WithMaxBytes, so it can exceed the number
-	// of lines in Text.
+	// of lines in Text. Across the entries of one group, Lines always sums to
+	// the number of lines the group consumed: lines the caps dropped are
+	// attributed to the last entry the group emits.
 	Lines int
 	// Truncated is set when lines belonging to this entry were dropped or cut
 	// by WithMaxLines/WithMaxBytes.
@@ -75,6 +77,20 @@ type Matcher interface {
 	Format(index int) string
 }
 
+// FinalMatcher is an optional extension of [Matcher]. A matcher that can tell
+// the aggregator which states are dead ends — states no line can leave, so no
+// further line can extend a group sitting in one — lets such a group be
+// emitted the moment it is complete, instead of waiting for the key's next
+// line or a flush. [patterns.StateMachine] implements it (a state with no
+// outgoing transitions), as does the cri matcher, where the "F" line closing a
+// fragment run is definitive.
+type FinalMatcher interface {
+	Matcher
+	// Final reports whether a group whose active set is exactly {index} can
+	// never consume another line.
+	Final(index int) bool
+}
+
 // defaultMatcher recognizes the stack-trace formats bundled in the patterns
 // subpackage.
 var defaultMatcher Matcher = patterns.MustCompile(patterns.All...)
@@ -88,7 +104,9 @@ type lineAux[T any] struct {
 	data T
 }
 
-// group buffers the pending lines of one key.
+// group buffers the pending lines of one key. Flushed groups go on the
+// aggregator's free list, where next chains them, so a busy stream reuses the
+// line buffers instead of allocating a group per trace.
 type group[T any] struct {
 	prev, next *group[T]
 	key        string
@@ -117,30 +135,48 @@ type group[T any] struct {
 type Aggregator[T any] struct {
 	emit    Emitter[T]
 	matcher Matcher
+	final   FinalMatcher // nil unless matcher implements it
 	now     func() time.Time
 
 	groups      map[string]*group[T]
 	first, last *group[T] // groups in last-touched order
 	bytes       int       // text bytes retained across all groups
 
-	maxLines  int
-	maxBytes  int
-	maxGroups int
-	noText    bool
+	free    *group[T] // recycled groups, chained through next
+	freeLen int
 
-	scratch [1]string // borrowed backing for single-line Entry.Texts
+	maxLines      int
+	maxBytes      int
+	maxGroups     int
+	maxTotalBytes int
+	noText        bool
+
+	// Borrowed backing for single-line Entry.Texts, one slot per level of
+	// emitter re-entrancy: an emitter that feeds this same aggregator must not
+	// see the Texts of the entry it is still handling change under it.
+	scratch []string
+	depth   int
 }
+
+// Free-list bounds: enough groups to cover the churn of a busy stream without
+// pinning much, and a line-buffer ceiling so one huge trace does not leave a
+// large array parked on the list.
+const (
+	maxFreeGroups = 4
+	maxFreeLines  = 64
+)
 
 // Option configures an [Aggregator] at construction time.
 type Option func(*config)
 
 type config struct {
-	matcher   Matcher
-	now       func() time.Time
-	maxLines  int
-	maxBytes  int
-	maxGroups int
-	noText    bool
+	matcher       Matcher
+	now           func() time.Time
+	maxLines      int
+	maxBytes      int
+	maxGroups     int
+	maxTotalBytes int
+	noText        bool
 }
 
 // WithMatcher selects a custom [Matcher] (typically a [patterns.StateMachine]
@@ -174,6 +210,17 @@ func WithMaxGroups(n int) Option {
 	return func(c *config) { c.maxGroups = n }
 }
 
+// WithMaxTotalBytes caps the text bytes retained across all groups (the gauge
+// [Aggregator.Bytes] reports). When a line pushes the total over the cap, the
+// least recently touched groups are flushed until it fits again. A value <= 0
+// means unlimited. Unlike WithMaxGroups x WithMaxBytes, this bounds the
+// aggregator's memory directly, whatever the key cardinality. The most
+// recently touched group is never evicted, so pair this with [WithMaxBytes] to
+// bound a single group too.
+func WithMaxTotalBytes(n int) Option {
+	return func(c *config) { c.maxTotalBytes = n }
+}
+
 // WithoutText skips building [Entry].Text (it is left empty), for emitters
 // that consume [Entry].Texts instead. This avoids joining an aggregated
 // entry's lines into one string — for a large capped trace, a copy the size
@@ -197,16 +244,22 @@ func New[T any](emit Emitter[T], opts ...Option) *Aggregator[T] {
 	for _, opt := range opts {
 		opt(&c)
 	}
-	return &Aggregator[T]{
-		emit:      emit,
-		matcher:   c.matcher,
-		now:       c.now,
-		groups:    make(map[string]*group[T]),
-		maxLines:  c.maxLines,
-		maxBytes:  c.maxBytes,
-		maxGroups: c.maxGroups,
-		noText:    c.noText,
+	a := &Aggregator[T]{
+		emit:          emit,
+		matcher:       c.matcher,
+		now:           c.now,
+		groups:        make(map[string]*group[T]),
+		maxLines:      c.maxLines,
+		maxBytes:      c.maxBytes,
+		maxGroups:     c.maxGroups,
+		maxTotalBytes: c.maxTotalBytes,
+		noText:        c.noText,
+		scratch:       make([]string, 1),
 	}
+	if fm, ok := c.matcher.(FinalMatcher); ok {
+		a.final = fm
+	}
+	return a
 }
 
 // Add feeds a single line into the aggregator. The key groups related lines
@@ -227,11 +280,16 @@ func (a *Aggregator[T]) Add(ctx context.Context, key, line string, data T) error
 // old logs. Times are assumed to be non-decreasing across calls. A zero when
 // is allowed (Add uses one): staleness falls back to the aggregator clock and
 // Entry.When stays zero.
+//
+// The line is always accounted for, even when an emitter error is on its way
+// out: an error raised by a flush this line triggered is held back until the
+// line itself has been buffered or emitted, so no input is lost to it.
 func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.Time, data T) error {
 	if key == "" {
 		return a.emitLine(ctx, Entry[T]{When: when, Lines: 1, Data: data}, line)
 	}
 
+	var held error
 	if g := a.groups[key]; g != nil {
 		if next, accepted := a.matcher.Step(line, g.active); len(next) > 0 {
 			a.append(g, line, when, data)
@@ -243,48 +301,99 @@ func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.T
 			}
 			g.when = a.stamp(when)
 			a.moveLast(g)
+			if a.allFinal(next) {
+				// No line can extend the group: emit it now rather than
+				// holding it until the key's next line or a flush.
+				a.unlink(g)
+				return a.flush(ctx, g)
+			}
+			if a.maxTotalBytes > 0 {
+				return a.evict(ctx, nil)
+			}
 			return nil
 		}
 		// The line does not continue the group: flush it, then let the line
 		// start a new group or pass through below.
 		a.unlink(g)
-		if err := a.flush(ctx, g); err != nil {
-			return err
-		}
+		held = a.flush(ctx, g)
 	}
 
 	next, _ := a.matcher.Step(line, startStates)
 	if len(next) == 0 {
-		return a.emitLine(ctx, Entry[T]{Key: key, When: when, Lines: 1, Data: data}, line)
+		return firstErr(held, a.emitLine(ctx, Entry[T]{Key: key, When: when, Lines: 1, Data: data}, line))
 	}
 
 	// The accepted result is deliberately ignored here: an aggregated entry
 	// must span at least two source lines.
-	g := &group[T]{key: key, when: a.stamp(when), active: next}
+	g := a.newGroup(key, a.stamp(when), next)
 	a.append(g, line, when, data)
 	a.groups[key] = g
 	a.link(g)
-
-	for a.maxGroups > 0 && len(a.groups) > a.maxGroups {
-		oldest := a.first
-		a.unlink(oldest)
-		if err := a.flush(ctx, oldest); err != nil {
-			return err
-		}
+	if a.allFinal(next) {
+		// A first line landing in a dead end can never grow into an
+		// aggregate; flush emits it as the single line it is.
+		a.unlink(g)
+		return firstErr(held, a.flush(ctx, g))
 	}
 
-	return nil
+	return a.evict(ctx, held)
 }
 
-// emitLine hands a single-line entry to the emitter, lending the aggregator's
-// scratch slot as the Texts backing.
+// allFinal reports whether no further line can extend a group whose active set
+// is next, which makes the group complete the moment it is buffered.
+func (a *Aggregator[T]) allFinal(next []int) bool {
+	if a.final == nil {
+		return false
+	}
+	for _, state := range next {
+		if !a.final.Final(state) {
+			return false
+		}
+	}
+	return true
+}
+
+// evict flushes least recently touched groups until the group-count and
+// total-byte caps are met, keeping the most recently touched group so the
+// current line always has somewhere to accumulate. held, the error of an
+// earlier flush in the same call, wins over any error raised here.
+func (a *Aggregator[T]) evict(ctx context.Context, held error) error {
+	for a.first != a.last &&
+		(a.maxGroups > 0 && len(a.groups) > a.maxGroups ||
+			a.maxTotalBytes > 0 && a.bytes > a.maxTotalBytes) {
+		g := a.first
+		a.unlink(g)
+		held = firstErr(held, a.flush(ctx, g))
+	}
+	return held
+}
+
+// firstErr keeps the earlier of two emitter errors.
+func firstErr(held, err error) error {
+	if held != nil {
+		return held
+	}
+	return err
+}
+
+// emitLine hands a single-line entry to the emitter, lending a scratch slot as
+// the Texts backing. The slot is chosen by re-entrancy depth: an emitter that
+// calls back into this aggregator gets its own, leaving the Texts view of the
+// entry still in flight intact.
 func (a *Aggregator[T]) emitLine(ctx context.Context, e Entry[T], line string) error {
-	a.scratch[0] = line
-	e.Texts = a.scratch[:]
+	depth := a.depth
+	if depth == len(a.scratch) {
+		a.scratch = append(a.scratch, "")
+	}
+	a.scratch[depth] = line
+	e.Texts = a.scratch[depth : depth+1 : depth+1]
 	if !a.noText {
 		e.Text = line
 	}
-	return a.emit(ctx, e)
+	a.depth = depth + 1
+	err := a.emit(ctx, e)
+	a.depth = depth
+	return err
 }
 
 // stamp resolves the staleness timestamp for a buffered line: the caller's
@@ -311,6 +420,18 @@ func (a *Aggregator[T]) Len() int {
 // a cheap gauge for memory monitoring.
 func (a *Aggregator[T]) Bytes() int {
 	return a.bytes
+}
+
+// Keys appends the keys with buffered lines to dst, least recently touched
+// first — the order [Aggregator.Stop] and the [WithMaxGroups] eviction use.
+// Pass a reused slice (dst[:0]) to keep the call allocation-free. It is for
+// inspection only: flushing while iterating the result is fine, since the keys
+// are copies.
+func (a *Aggregator[T]) Keys(dst []string) []string {
+	for g := a.first; g != nil; g = g.next {
+		dst = append(dst, g.key)
+	}
+	return dst
 }
 
 // Flush emits the pending group for key, if any. Use it when a stream ends,
@@ -399,13 +520,18 @@ func (a *Aggregator[T]) append(g *group[T], line string, when time.Time, data T)
 
 // flush emits g's longest accepted prefix as one aggregated entry and any
 // retained lines after it individually. A group that never completed has all
-// its lines emitted individually.
+// its lines emitted individually. The group is recycled afterwards, so the
+// Texts views lent to the emitter must not outlive their emit call.
 func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
-	tail := 0
-	if k := g.acceptedLines; k > 0 {
-		tail = k
+	tail := g.acceptedLines
+	// Lines the caps consumed but never retained, and that the aggregated
+	// entry's Lines does not already cover. They are charged to the last entry
+	// this flush emits, so Lines sums back to the lines the group consumed.
+	dropped := g.total - g.acceptedTotal - (len(g.lines) - tail)
+
+	if tail > 0 {
 		e := Entry[T]{
-			Texts:     g.lines[:k],
+			Texts:     g.lines[:tail:tail],
 			Key:       g.key,
 			Match:     g.match,
 			When:      g.aux[0].when,
@@ -413,8 +539,11 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 			Lines:     g.acceptedTotal,
 			Truncated: g.capped,
 		}
+		if tail == len(g.lines) {
+			e.Lines += dropped
+		}
 		if !a.noText {
-			e.Text = strings.Join(g.lines[:k], "\n")
+			e.Text = strings.Join(g.lines[:tail], "\n")
 		}
 		if err := a.emit(ctx, e); err != nil {
 			return err
@@ -422,23 +551,57 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 	}
 
 	for i := tail; i < len(g.lines); i++ {
-		e := Entry[T]{Texts: g.lines[i : i+1], Key: g.key, When: g.aux[i].when, Lines: 1, Data: g.aux[i].data}
+		e := Entry[T]{Texts: g.lines[i : i+1 : i+1], Key: g.key, When: g.aux[i].when, Lines: 1, Data: g.aux[i].data}
 		if !a.noText {
 			e.Text = g.lines[i]
 		}
-		if tail == 0 && g.capped && i == len(g.lines)-1 {
-			e.Truncated = true
+		if i == len(g.lines)-1 {
+			e.Lines += dropped
+			if tail == 0 && g.capped {
+				e.Truncated = true
+			}
 		}
 		if err := a.emit(ctx, e); err != nil {
 			return err
 		}
 	}
 
+	a.release(g)
 	return nil
 }
 
-// unlink removes g from the last-touched list and the key map.
-func (a *Aggregator[T]) unlink(g *group[T]) {
+// newGroup returns a group for key, reusing a recycled one (and its line
+// buffers) when the free list is not empty.
+func (a *Aggregator[T]) newGroup(key string, when time.Time, active []int) *group[T] {
+	g := a.free
+	if g == nil {
+		return &group[T]{key: key, when: when, active: active}
+	}
+	a.free, a.freeLen = g.next, a.freeLen-1
+	*g = group[T]{key: key, when: when, active: active, lines: g.lines, aux: g.aux}
+	return g
+}
+
+// release parks a flushed group on the free list so the next group can reuse
+// its line buffers. The buffers are cleared to their full capacity first: a
+// recycled group must not keep the strings (or the T values) of the entry it
+// just emitted alive.
+func (a *Aggregator[T]) release(g *group[T]) {
+	if a.freeLen >= maxFreeGroups {
+		return
+	}
+	lines, aux := g.lines[:cap(g.lines)], g.aux[:cap(g.aux)]
+	if cap(lines) > maxFreeLines {
+		lines, aux = nil, nil
+	}
+	clear(lines)
+	clear(aux)
+	*g = group[T]{lines: lines[:0], aux: aux[:0], next: a.free}
+	a.free, a.freeLen = g, a.freeLen+1
+}
+
+// detach removes g from the last-touched list only.
+func (a *Aggregator[T]) detach(g *group[T]) {
 	if a.first == g {
 		a.first = g.next
 	}
@@ -453,6 +616,11 @@ func (a *Aggregator[T]) unlink(g *group[T]) {
 	}
 	g.prev = nil
 	g.next = nil
+}
+
+// unlink removes g from the last-touched list and the key map.
+func (a *Aggregator[T]) unlink(g *group[T]) {
+	a.detach(g)
 	a.bytes -= g.bytes
 	delete(a.groups, g.key)
 }
@@ -475,14 +643,6 @@ func (a *Aggregator[T]) moveLast(g *group[T]) {
 	if g == a.last {
 		return
 	}
-	if a.first == g {
-		a.first = g.next
-	}
-	if g.prev != nil {
-		g.prev.next = g.next
-	}
-	if g.next != nil {
-		g.next.prev = g.prev
-	}
+	a.detach(g)
 	a.link(g)
 }

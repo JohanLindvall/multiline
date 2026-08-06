@@ -80,6 +80,84 @@ func TestMaxBytesFirstLineMultibyte(t *testing.T) {
 	}, got)
 }
 
+// threeState builds a machine whose continuation lands in an accepting state
+// once and in a non-terminal one thereafter, so a cap can bite strictly after
+// the group's last accept.
+func threeState(t *testing.T, emit Emitter[int], opts ...Option) *Aggregator[int] {
+	t.Helper()
+	sm, err := patterns.Compile(patterns.StateSet{Name: "test", States: []patterns.State{
+		{Name: patterns.StartState, Transitions: []patterns.Transition{{Pattern: `^HDR`, Next: "ok"}}},
+		{Name: "ok", Transitions: []patterns.Transition{{Pattern: `^cont`, Next: "tail"}}},
+		{Name: "tail", NonTerminal: true, Transitions: []patterns.Transition{{Pattern: `^cont`, Next: "tail"}}},
+	}})
+	assert.NoError(t, err)
+	return New(emit, append(opts, WithMatcher(sm))...)
+}
+
+// TestDroppedLinesAccounted is a regression test: lines the caps dropped from a
+// group that never reached an accepting state used to disappear from the Lines
+// accounting, so summing Lines over a stream under-counted the input.
+func TestDroppedLinesAccounted(t *testing.T) {
+	var got []Entry[int]
+	ml := threeState(t, func(_ context.Context, e Entry[int]) error {
+		e.Texts = nil
+		got = append(got, e)
+		return nil
+	}, WithMaxLines(3))
+	ctx := context.Background()
+	// Five lines consumed; the group never completes (only "ok" accepts, and
+	// the first line's accept does not count), so all three retained lines are
+	// emitted individually and the two dropped ones are charged to the last.
+	for i, line := range []string{"HDR", "cont1", "cont2", "cont3", "cont4"} {
+		assert.NoError(t, ml.Add(ctx, "key", line, i))
+	}
+	assert.NoError(t, ml.Stop(ctx))
+
+	assert.Equal(t, []Entry[int]{
+		{Text: "HDR", Key: "key", Lines: 1, Data: 0},
+		{Text: "cont1", Key: "key", Lines: 1, Data: 1},
+		{Text: "cont2", Key: "key", Lines: 3, Data: 2, Truncated: true},
+	}, got)
+
+	total := 0
+	for _, e := range got {
+		total += e.Lines
+	}
+	assert.Equal(t, 5, total, "Lines must sum to the lines consumed")
+}
+
+// TestDroppedLinesAfterAccept covers the same accounting when there is an
+// aggregated prefix and the cap dropped every line after it.
+func TestDroppedLinesAfterAccept(t *testing.T) {
+	// The second line accepts; every line after it lands in a non-terminal
+	// state, so the accepted prefix stops growing while the cap drops the rest.
+	sm, err := patterns.Compile(patterns.StateSet{Name: "test", States: []patterns.State{
+		{Name: patterns.StartState, Transitions: []patterns.Transition{{Pattern: `^HDR`, Next: "ok"}}},
+		{Name: "ok", Transitions: []patterns.Transition{{Pattern: `^cont`, Next: "mid"}}},
+		{Name: "mid", Transitions: []patterns.Transition{{Pattern: `^cont`, Next: "tail"}}},
+		{Name: "tail", NonTerminal: true, Transitions: []patterns.Transition{{Pattern: `^cont`, Next: "tail"}}},
+	}})
+	assert.NoError(t, err)
+
+	var got []Entry[int]
+	ml := New(func(_ context.Context, e Entry[int]) error {
+		e.Texts = nil
+		got = append(got, e)
+		return nil
+	}, WithMatcher(sm), WithMaxLines(2))
+	ctx := context.Background()
+	for i, line := range []string{"HDR", "cont1", "cont2", "cont3"} {
+		assert.NoError(t, ml.Add(ctx, "key", line, i))
+	}
+	assert.NoError(t, ml.Stop(ctx))
+
+	// The accepted prefix is both retained lines, so the two dropped lines are
+	// charged to the aggregated entry itself.
+	assert.Equal(t, []Entry[int]{
+		{Text: "HDR\ncont1", Key: "key", Match: "test", Lines: 4, Data: 0, Truncated: true},
+	}, got)
+}
+
 // TestMaxBytesNeverAccepted verifies the Truncated flag lands on the last
 // individually emitted line when a capped group never completes.
 func TestMaxBytesNeverAccepted(t *testing.T) {

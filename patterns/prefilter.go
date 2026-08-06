@@ -19,41 +19,82 @@ import (
 // containing "Error:" pays one regex, not all of them.
 //
 // The literals are computed from the actual patterns, so a pattern change
-// cannot silently break the implication: if no literal set can be proven for
-// every start transition, the prefilter is disabled and Step always runs the
-// regexes. Correctness is additionally covered by a differential test over
-// the corpus (TestPrefilterDifferential).
+// cannot silently break the implication. Degradation is per transition, not
+// per machine: a start pattern with no provable literal (and any beyond the
+// 64th, for which no mask bit is left) simply becomes a permanent candidate,
+// so its regex runs on every line while every other pattern keeps filtering.
+// Only a machine where nothing at all is provable disables the prefilter
+// outright. [StateMachine.UnfilteredStarts] reports the patterns that fell
+// back. Correctness is additionally covered by a differential test over the
+// corpus (TestPrefilterDifferential).
 
 // prefilter maps probe literals to the start transitions they imply.
 // literals[i] hitting a line marks masks[i]'s bits of transitions[0] as
-// candidates; a line with no hits cannot match any start transition.
+// candidates; a line with no hits can only match the always/wide transitions.
 type prefilter struct {
 	literals []string
 	masks    []uint64
+	// parents[i] is the index of a shorter kept literal that literals[i]
+	// contains, or -1 for a root. The linear scan skips a child literal when
+	// its parent was not found in the line: the line cannot contain the
+	// longer probe either. This keeps the per-line cost at the number of
+	// containment-distinct probes even when precision (see the fold rule
+	// below) retains several probes sharing a stem, e.g. "Error" alongside
+	// "Error:" and "Error: ". partition orders the roots first (indices
+	// [0,roots)) so the common no-stem line never touches the children at
+	// all; every parent is a root (fold order is shortest-first, so a chain
+	// of containments bottoms out at a parentless probe, and that shortest
+	// stem is always the first containment found).
+	parents []int16
+	// roots is the partition point, and parentHits the bitmap of roots that
+	// are some child's parent: when no such root hit, the child loop is
+	// skipped wholesale.
+	roots      int
+	parentHits uint64
+	// always holds the transitions no literal could be proven for: they are
+	// candidates for every line. wide records that there are start transitions
+	// past bit 63, which no mask can address, so they too always run.
+	always     uint64
+	wide       bool
+	unfiltered []string
 	// ac replaces the linear Contains scan when the literal count crosses
-	// acMinLiterals (see ahocorasick.go); nil otherwise.
+	// acMinLiterals (see ahocorasick.go); nil otherwise. It needs no parent
+	// logic: the automaton visits every literal in one pass regardless.
 	ac *ahoCorasick
 }
 
 // scan returns the union of the candidate-transition masks of every probe
-// literal contained in line.
+// literal contained in line, plus the always-candidate transitions.
 func (pf *prefilter) scan(line string) uint64 {
 	if pf.ac != nil {
-		return pf.ac.scan(line)
+		return pf.ac.scan(line) | pf.always
 	}
-	var mask uint64
-	for i, lit := range pf.literals {
+	mask := pf.always
+	var hits uint64 // found-root bitmap, indexed like literals (first 64)
+	for i, lit := range pf.literals[:pf.roots] {
 		if strings.Contains(line, lit) {
 			mask |= pf.masks[i]
+			if i < 64 {
+				hits |= 1 << uint(i)
+			}
+		}
+	}
+	if hits&pf.parentHits != 0 {
+		for i := pf.roots; i < len(pf.literals); i++ {
+			if hits&(1<<uint(pf.parents[i])) == 0 {
+				continue // the contained shorter probe already missed
+			}
+			if strings.Contains(line, pf.literals[i]) {
+				mask |= pf.masks[i]
+			}
 		}
 	}
 	return mask
 }
 
 // startPrefilter derives the prefilter from every start-state transition of
-// the given sets. ok is false when any pattern's required literals cannot be
-// proven, or there are more than 64 start transitions (the prefilter must
-// then be disabled).
+// the given sets. ok is false only when not one probe literal could be proven,
+// leaving nothing to filter with.
 func startPrefilter(sets []StateSet) (*prefilter, bool) {
 	type probe struct {
 		lit  string
@@ -61,6 +102,7 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 	}
 	var probes []probe
 	index := make(map[string]int)
+	pf := &prefilter{}
 	transition := 0
 	for _, set := range sets {
 		for _, st := range set.States {
@@ -68,12 +110,18 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 				continue
 			}
 			for _, tr := range st.Transitions {
-				if transition >= 64 {
-					return nil, false
-				}
 				ls, ok := requiredLiterals(tr.Pattern)
-				if !ok {
-					return nil, false
+				if !ok || transition >= 64 {
+					// Nothing provable, or no mask bit left to address this
+					// transition with: it must be tried for every line.
+					pf.unfiltered = append(pf.unfiltered, tr.Pattern)
+					if transition < 64 {
+						pf.always |= 1 << transition
+					} else {
+						pf.wide = true
+					}
+					transition++
+					continue
 				}
 				for _, l := range ls {
 					if i, ok := index[l]; ok {
@@ -91,35 +139,99 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 		return nil, false
 	}
 
-	// Fold literals that contain a shorter kept literal into it: a line
-	// containing the long probe necessarily contains the short one, so the
-	// long check is redundant — its transitions just become candidates of
-	// the short probe. Shortest-first order makes the fold deterministic.
+	// Fold literals that contain a shorter kept literal into it — but only when
+	// the long probe implies no transition the short one does not already
+	// imply. A line containing the long probe necessarily contains the short
+	// one, so folding saves a Contains call; what it costs is precision, since
+	// every hit on the short probe then drags in the long probe's transitions
+	// too. With substring search an order of magnitude cheaper than the
+	// regexes it guards, precision is the better buy: it is what keeps a line
+	// carrying the bare word "Error" from running java's unanchored
+	// "...(Exception|Error|Throwable):" pattern. Shortest-first order makes
+	// the fold deterministic.
 	slices.SortStableFunc(probes, func(a, b probe) int {
 		if c := cmp.Compare(len(a.lit), len(b.lit)); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.lit, b.lit)
 	})
-	pf := &prefilter{}
 	for _, p := range probes {
 		folded := false
+		parent := int16(-1)
 		for i, kept := range pf.literals {
-			if strings.Contains(p.lit, kept) {
+			if !strings.Contains(p.lit, kept) {
+				continue
+			}
+			if p.mask&^pf.masks[i] == 0 {
 				pf.masks[i] |= p.mask
 				folded = true
 				break
+			}
+			// Contained but not foldable: remember it as the scan-skip parent
+			// (only the first 64 literals have a bit in the hits bitmap).
+			if parent < 0 && i < 64 {
+				parent = int16(i)
 			}
 		}
 		if !folded {
 			pf.literals = append(pf.literals, p.lit)
 			pf.masks = append(pf.masks, p.mask)
+			pf.parents = append(pf.parents, parent)
 		}
 	}
+	pf.partition()
 	if len(pf.literals) >= acMinLiterals {
 		pf.ac = buildAhoCorasick(pf.literals, pf.masks)
 	}
 	return pf, true
+}
+
+// partition reorders the probes so the roots (no parent) come first, followed
+// by the children, with parents remapped to the new root indices. The scan
+// then walks the roots unconditionally and enters the child region only when
+// a parent root hit. A child whose parent lands past bit 63 of the hits
+// bitmap is promoted to a root (checked unconditionally); children are never
+// parents themselves, so promotion cannot cascade.
+func (pf *prefilter) partition() {
+	n := len(pf.literals)
+	newIndex := make([]int16, n)
+	isRoot := make([]bool, n)
+	roots := 0
+	for i := range n {
+		if pf.parents[i] < 0 {
+			isRoot[i], newIndex[i] = true, int16(roots)
+			roots++
+		}
+	}
+	for i := range n {
+		if !isRoot[i] && newIndex[pf.parents[i]] >= 64 {
+			isRoot[i], newIndex[i] = true, int16(roots)
+			roots++
+		}
+	}
+	next := roots
+	for i := range n {
+		if !isRoot[i] {
+			newIndex[i] = int16(next)
+			next++
+		}
+	}
+
+	literals := make([]string, n)
+	masks := make([]uint64, n)
+	parents := make([]int16, n)
+	for old := range n {
+		ni := newIndex[old]
+		literals[ni], masks[ni] = pf.literals[old], pf.masks[old]
+		if isRoot[old] {
+			parents[ni] = -1
+		} else {
+			p := newIndex[pf.parents[old]]
+			parents[ni] = p
+			pf.parentHits |= 1 << uint(p)
+		}
+	}
+	pf.literals, pf.masks, pf.parents, pf.roots = literals, masks, parents, roots
 }
 
 // requiredLiterals returns strings such that every match of pattern contains

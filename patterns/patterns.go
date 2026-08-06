@@ -211,14 +211,19 @@ func (s *StateMachine) Step(line string, active []int) (next []int, accepted int
 func (s *StateMachine) stepStart(line string) (next []int, accepted int) {
 	mask := s.pf.scan(line)
 	accepted = -1
-	if mask == 0 {
+	if mask == 0 && !s.pf.wide {
 		return nil, accepted
 	}
 
 	var buf [maxActiveStates]int
 	n := 0
 	for i, tr := range s.transitions[0] {
-		if mask&(1<<uint(i)) == 0 || !tr.pattern.MatchString(line) {
+		// Transitions past bit 63 have no mask bit and always run; see
+		// prefilter.wide.
+		if i < 64 && mask&(1<<uint(i)) == 0 {
+			continue
+		}
+		if !tr.pattern.MatchString(line) {
 			continue
 		}
 		if accepted < 0 && !s.nonTerminal[tr.next] {
@@ -252,16 +257,38 @@ func (s *StateMachine) Format(index int) string {
 	return s.format[index]
 }
 
-// StartLiterals returns the literal prefilter derived from the start-state
-// patterns at Compile time: every line that matches any start transition
-// contains at least one of the returned substrings, so lines containing none
-// skip the start regexes entirely (and a hit runs only the transitions the
-// literal implies). It returns nil when no such set could be proven for
-// every start pattern and the prefilter is disabled — worth checking in a
-// test when start-pattern matching is on your hot path.
+// Final implements the optional multiline.FinalMatcher interface: a state with
+// no outgoing transitions is a dead end, and a group that lands in one is
+// complete — the aggregator emits it right away instead of holding it until
+// the key's next line. The end of a PHP report ("thrown in ... on line N") and
+// a Rust panic's "note:" line are such states.
+func (s *StateMachine) Final(index int) bool {
+	return len(s.transitions[index]) == 0
+}
+
+// StartLiterals returns the probe literals the prefilter derived from the
+// start-state patterns at Compile time: a line matching a filtered start
+// transition contains at least one of them, so lines containing none skip
+// those regexes entirely, and a hit runs only the transitions the literal
+// implies. It returns nil only when nothing was provable anywhere and the
+// prefilter is disabled outright. Since degradation is per transition, pair
+// this with [StateMachine.UnfilteredStarts] when start-pattern matching is on
+// your hot path.
 func (s *StateMachine) StartLiterals() []string {
 	if s.pf == nil {
 		return nil
 	}
 	return slices.Clone(s.pf.literals)
+}
+
+// UnfilteredStarts returns the start patterns the prefilter could not narrow,
+// whose regexes therefore run on every line: those with no provable
+// case-sensitive literal of at least three bytes, plus any past the 64th start
+// transition. A set worth adding to a hot path should keep this empty — it is
+// the difference between roughly 100ns and several microseconds per line.
+func (s *StateMachine) UnfilteredStarts() []string {
+	if s.pf == nil {
+		return nil
+	}
+	return slices.Clone(s.pf.unfiltered)
 }

@@ -14,15 +14,20 @@ ordinary single-line logs straight through untouched.
 
 ## Supported formats
 
-- Go (`panic:` / goroutine dumps)
-- Java / JVM (also claims Node.js traces with an error-class headline like
-  `TypeError:`, which share the `at ...` frame shape)
+- Go (`panic:`, runtime `fatal error:` crashes, `SIGQUIT:` dumps, and their
+  goroutine blocks)
+- Java / JVM (with or without an exception message; also claims Node.js
+  traces with an error-class headline like `TypeError:`, which share the
+  `at ...` frame shape)
 - Node.js (bare `Error:` headlines and V8 stack-trace markers)
-- Python (including chained exceptions)
-- .NET
+- Python (including chained exceptions and non-`Error` terminators such as
+  `KeyboardInterrupt`)
+- .NET (reported as `dotnet` even when its `   at ` frames would also satisfy
+  Java's)
 - Ruby
 - Rust (panics, with or without backtrace)
 - PHP
+- Elixir
 - Kubernetes CRI partial lines (via the [cri](cri) subpackage, see
   [CRI partial lines](#kubernetes-cri-partial-lines))
 
@@ -112,15 +117,20 @@ The runnable version lives in [examples/simple](examples/simple/main.go)
   stream ends, e.g. when its container terminates.
 - `FlushBefore(ctx, t)` — emit pending groups last touched before `t`.
 - `Stop(ctx)` — flush everything (oldest first) and reset for reuse.
-- `Pending(key)`, `Len()`, `Bytes()` — cheap gauges for monitoring: whether a
-  key has buffered lines, how many keys do, and the total buffered text
-  bytes.
+- `Pending(key)`, `Len()`, `Bytes()`, `Keys(dst)` — cheap gauges for
+  monitoring: whether a key has buffered lines, how many keys do, the total
+  buffered text bytes, and the pending keys in last-touched order.
 
 ### Buffering latency
 
 A line that matches any start pattern is buffered until the next line for its
-key arrives, so the last entry of an idle stream stays pending. Every real
-deployment should flush stale groups periodically:
+key arrives, so the last entry of an idle stream stays pending. The exception
+is a group that provably cannot continue: when every active state is a dead
+end — PHP's closing `thrown in ... on line N`, a Rust panic ended by its
+`note:` line, a CRI fragment run closed by its `F` line — the entry is
+emitted immediately (see `multiline.FinalMatcher`, which
+`patterns.StateMachine` implements). Everything else needs a periodic flush
+of stale groups:
 
 ```go
 ticker := time.NewTicker(time.Second)
@@ -134,9 +144,10 @@ for range ticker.C {
 
 ### Bounding memory
 
-By default a group grows until its match completes. Three options bound the
-aggregator; entries that lost lines to a cap are flagged `Truncated`
-(`0` means unlimited):
+By default a group grows until its match completes. Four options bound the
+aggregator; entries that lost lines to a cap are flagged `Truncated`, and
+`Entry.Lines` still counts the dropped lines, so summing it over a stream
+always accounts for every input line (`0` means unlimited):
 
 - `WithMaxLines(n)` — retain at most `n` lines per group; further lines are
   dropped while matching continues normally.
@@ -145,12 +156,18 @@ aggregator; entries that lost lines to a cap are flagged `Truncated`
 - `WithMaxGroups(n)` — track at most `n` keys with pending lines; beyond it
   the least recently touched group is flushed. This guards against key
   cardinality explosions.
+- `WithMaxTotalBytes(n)` — cap the text bytes buffered across *all* groups
+  (the `Bytes()` gauge); least recently touched groups are flushed until the
+  total fits. This bounds the aggregator's memory directly, whatever the key
+  cardinality; pair it with `WithMaxBytes` since the most recently touched
+  group itself is never evicted.
 
 ```go
 ml := multiline.New(emit,
 	multiline.WithMaxLines(500),
 	multiline.WithMaxBytes(64*1024),
-	multiline.WithMaxGroups(10_000))
+	multiline.WithMaxGroups(10_000),
+	multiline.WithMaxTotalBytes(64*1024*1024))
 ```
 
 An emitter that writes lines to an `io.Writer` can consume `Entry.Texts` and
@@ -162,10 +179,11 @@ entry.
 
 Matching is driven by declarative state machines in the
 [patterns](patterns) subpackage. The bundled definitions are exported
-(`patterns.Go`, `patterns.Java`, `patterns.Python`, `patterns.DotNet`,
-`patterns.NodeJS`, `patterns.Ruby`, `patterns.Rust`, `patterns.PHP`, collected in
-`patterns.All`), so you can compile a subset, or add your own set alongside
-them — its `Name` is what completed entries report as `Match`:
+(`patterns.Go`, `patterns.DotNet`, `patterns.Java`, `patterns.NodeJS`,
+`patterns.Python`, `patterns.Ruby`, `patterns.Rust`, `patterns.PHP`,
+`patterns.Elixir`, collected in `patterns.All`), so you can compile a subset,
+or add your own set alongside them — its `Name` is what completed entries
+report as `Match`:
 
 ```go
 set := patterns.StateSet{Name: "tx", States: []patterns.State{
@@ -196,8 +214,16 @@ Notes:
   after them are re-emitted individually. An aggregated entry always spans at
   least two source lines. Use `NonTerminal` for intermediate states that are
   not a valid stopping point.
+- Non-matching lines are rejected by a literal prefilter derived from the
+  start patterns at compile time, at roughly 100ns per line instead of
+  running every start regex. The filter degrades per pattern: a start
+  pattern with no provable case-sensitive literal of at least 3 bytes simply
+  runs on every line while the rest keep filtering —
+  `StateMachine.UnfilteredStarts()` reports such patterns, worth asserting
+  empty in a test when adding a set to a hot path.
 - For full control you can implement the `multiline.Matcher` interface
-  directly instead of compiling state sets.
+  directly instead of compiling state sets (plus `multiline.FinalMatcher` to
+  get completed groups emitted without waiting for the next line).
 
 A runnable example lives in [examples/custom](examples/custom/main.go)
 (`go run ./examples/custom`).
@@ -225,7 +251,9 @@ err := logs.Add(ctx, containerID, rawLine, data)
 
 `cri.New` accepts the same `WithMaxLines` / `WithMaxBytes` / `WithMaxGroups`
 options to bound fragment buffering, and has its own `Flush`, `FlushBefore`,
-`Stop` (stop the upstream stage first) and `Len` / `Bytes` gauges. Lines that
+`Stop` (stop the upstream stage first) and `Pending` / `Len` / `Bytes`
+gauges. A fragment run is handed on the moment its closing `F` line arrives —
+nothing waits for the stream's next line. Lines that
 are not CRI-formatted pass through unmodified with a zero time, and
 `cri.Parse` is exported for callers that need the pieces. A tailer that already parses each line (to derive the key, or to
 route by stream) should feed the parse result to `AddParsed` instead of

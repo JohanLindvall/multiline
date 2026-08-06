@@ -144,6 +144,11 @@ func (matcher) Step(line string, active []int) (next []int, accepted int) {
 
 func (matcher) Format(int) string { return "cri" }
 
+// Final implements multiline.FinalMatcher. The "F" line closing a fragment run
+// is definitive, so the rejoined line is handed to the [Next] stage as soon as
+// it arrives instead of waiting for the stream's next line.
+func (matcher) Final(state int) bool { return state == stateFull }
+
 // Next receives each rejoined application line: the key it was added under
 // (suffixed "/stdout" or "/stderr"), the line with CRI prefixes stripped, and
 // the timestamp of its first fragment (zero for a non-CRI line passed
@@ -205,19 +210,25 @@ func (a *Aggregator[T]) AddParsed(ctx context.Context, key, raw string, line Lin
 	return a.inner.AddAt(ctx, key, raw, line.Time, data)
 }
 
-// streamKey returns "<key>/<stream>", cached for the previous key so repeated
-// lines from one source do not allocate.
-func (a *Aggregator[T]) streamKey(key, stream string) string {
+// streamKeys returns key's "<key>/stdout" and "<key>/stderr" forms, cached for
+// the previous key so repeated lines from one source do not allocate.
+func (a *Aggregator[T]) streamKeys(key string) (stdout, stderr string) {
 	if key != a.lastKey {
 		a.lastKey = key
 		a.lastStdout = key + "/stdout"
 		a.lastStderr = key + "/stderr"
 	}
+	return a.lastStdout, a.lastStderr
+}
+
+// streamKey returns "<key>/<stream>".
+func (a *Aggregator[T]) streamKey(key, stream string) string {
+	stdout, stderr := a.streamKeys(key)
 	switch stream {
 	case "stdout":
-		return a.lastStdout
+		return stdout
 	case "stderr":
-		return a.lastStderr
+		return stderr
 	default: // only reachable via AddParsed with a non-CRI stream
 		return key + "/" + stream
 	}
@@ -255,12 +266,18 @@ func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[T]) error 
 // Line.Stream are not covered — flush those with [Aggregator.FlushBefore] or
 // [Aggregator.Stop].
 func (a *Aggregator[T]) Flush(ctx context.Context, key string) error {
-	for _, k := range []string{key + "/stdout", key + "/stderr"} {
-		if err := a.inner.Flush(ctx, k); err != nil {
-			return err
-		}
+	stdout, stderr := a.streamKeys(key)
+	if err := a.inner.Flush(ctx, stdout); err != nil {
+		return err
 	}
-	return nil
+	return a.inner.Flush(ctx, stderr)
+}
+
+// Pending reports whether key has buffered fragments on either stream. Runs fed
+// via [Aggregator.AddParsed] with a non-standard Line.Stream are not covered.
+func (a *Aggregator[T]) Pending(key string) bool {
+	stdout, stderr := a.streamKeys(key)
+	return a.inner.Pending(stdout) || a.inner.Pending(stderr)
 }
 
 // FlushBefore hands pending fragment runs whose last fragment carries a

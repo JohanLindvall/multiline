@@ -15,8 +15,11 @@ Use the Makefile (same shape as JohanLindvall/lightning):
   issues
 - `make fix` — gofmt + go mod tidy
 - `make bench` — benchmarks (the no-match path must stay on the prefilter
-  fast path, ~100ns/line; see below)
-- `make fuzz` — 30s conservation-invariant fuzz burst
+  fast path: ~105ns/line at the matcher, ~130ns/line through the
+  aggregator; see below)
+- `make fuzz` — 30s bursts of both fuzzers: uncapped conservation (no line
+  lost/duplicated/reordered) and capped conservation (`Entry.Lines` sums to
+  the lines consumed under `WithMaxLines`/`WithMaxBytes`)
 - CI (`.github/workflows/ci.yml`) mirrors lightning: one check job per arch
   (amd64+arm64) running `make test`, lint once on amd64 via
   golangci-lint-action pinned to v2.12.2, and auto patch-tagging on green main
@@ -50,10 +53,18 @@ Use the Makefile (same shape as JohanLindvall/lightning):
   aggregated entry spanning fewer than two source lines (first-line accepts
   are deliberately ignored).
 - The emitted `Match` is the `StateSet.Name`, resolved via
-  `Matcher.Format(acceptedStateIndex)`.
+  `Matcher.Format(acceptedStateIndex)`. It is the format of the *last*
+  accepting line, so where two sets overlap, the one that survives longest
+  wins ties — this is why `DotNet` precedes `Java` in `patterns.All` (.NET's
+  `   at ` frames also satisfy Java's frame pattern).
 - State names are namespaced per set; only `patterns.StartState` is shared.
   Transitions may only reference states within the same set (or the start
   state).
+- `multiline.FinalMatcher` (optional): when every active state is a dead end
+  (no outgoing transitions — `StateMachine.Final`), the group is emitted
+  immediately instead of waiting for the key's next line. PHP's `thrown`,
+  Rust's `note`, and cri's `stateFull` rely on this; a custom `Matcher` that
+  doesn't implement it just keeps the old hold-until-next-line behavior.
 
 ## Corpus test format
 
@@ -64,6 +75,10 @@ intentionally part of the last group (python.txt relies on this: the blank
 after the error line is absorbed by the trace). Every file under `tests/` is
 run through the *default* matcher, so corpora for non-default sets (CRI)
 don't belong there — test those with `WithMatcher` unit tests instead.
+Every corpus directory must have an entry in `corpusFormat`
+(multiline_test.go): aggregated entries are asserted to report that format
+(this is what catches one set silently claiming another's traces), and a new
+directory without an entry fails fast.
 
 ## Gotchas
 
@@ -71,12 +86,22 @@ don't belong there — test those with `WithMatcher` unit tests instead.
   substrings from the start patterns (via regexp/syntax) so non-matching
   lines skip the regexes entirely, and each literal carries a bitmask of the
   start transitions it implies, so a near-miss line (contains "Error:" but
-  matches nothing) runs one candidate regex instead of all of them. Every
-  start pattern must keep a provable case-sensitive literal of >= 3 bytes,
-  or the prefilter silently disables for the whole machine —
-  `TestBundledPrefilterEnabled` guards this; keep it passing when adding
-  formats. `TestPrefilterDifferential` proves the filter never changes a
-  decision.
+  matches nothing) runs one candidate regex instead of all of them.
+  Degradation is per transition: a start pattern with no provable
+  case-sensitive literal of >= 3 bytes (or past the 64th start transition)
+  becomes a permanent candidate — its regex runs on every line — while the
+  rest keep filtering; `StateMachine.UnfilteredStarts()` reports these, and
+  `TestBundledPrefilterEnabled` asserts it stays empty for the bundled sets.
+  `TestPrefilterDifferential` proves the filter never changes a decision.
+- Prefilter probe folding is subset-only: a longer literal folds into a
+  shorter contained one only when that implies no new transitions, because
+  precision is what keeps a line containing the bare word "Error" (probe of
+  java's cheap anchored no-message headline) from running the expensive
+  unanchored `.(Exception|Error|Throwable):` (probe "Error:"). The scan cost
+  of the extra probes is reclaimed by the root/child partition: children are
+  only probed when their parent stem hit. Keep start patterns anchored where
+  possible — the unanchored java headline costs ~1.9us when it runs, the
+  anchored ones ~35ns.
 - `Entry.When` is "the time you gave AddAt": lines fed via `Add` carry a
   zero When by design — that keeps the pass-through path free of clock
   reads (the staleness stamp for `FlushBefore` is taken lazily, only when a
@@ -87,9 +112,24 @@ don't belong there — test those with `WithMatcher` unit tests instead.
 
 - `Truncated` reporting: when a capped group flushes, the flag is set on the
   aggregated entry if there is one, else on the last individually emitted
-  line. The first line of a group is always retained (cut to `""` at worst) —
-  this is what prevents the historical empty-group panic; don't "optimize" it
-  away.
+  line — and the cap-dropped lines are charged to that same last entry's
+  `Lines`, so `sum(Lines)` always equals the lines consumed
+  (`FuzzCappedConservation` holds this). The first line of a group is always
+  retained (cut to `""` at worst) — this is what prevents the historical
+  empty-group panic; don't "optimize" it away.
+- A line that triggers a flush (by not continuing its group) is processed
+  even when that flush's emitter errors: the error is held, the line is
+  buffered or emitted, and the first error is returned. Don't reintroduce the
+  early return — it silently destroyed the triggering line.
+- Flushed `group`s are recycled through a small free list (`release`
+  clears the retained strings/`T`s so nothing leaks through reuse). This is
+  legal only because `Entry.Texts` is borrowed until the emitter returns —
+  never hand out group-backed slices with a longer lifetime. Single-line
+  entries lend a depth-indexed scratch slot instead, so emitters that
+  re-enter the same aggregator see stable `Texts`.
+- `WithMaxTotalBytes` eviction never touches the most recently touched group
+  (the current line must have somewhere to accumulate); a single oversized
+  group is bounded by `WithMaxBytes`, not by the total.
 - `FlushBefore` assumes non-decreasing times across `Add`/`AddAt` calls (the
   linked list is only sorted if times are).
 - Java's header pattern intentionally matches Node.js errors with an

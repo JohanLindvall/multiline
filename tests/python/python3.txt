@@ -1,0 +1,12 @@
+6,1,4
+Traceback (most recent call last):
+  File "app.py", line 12, in <module>
+    main()
+  File "app.py", line 8, in main
+    raise Exception("boom")
+Exception: boom
+2024-11-19 11:00:01 INFO shutting down
+Traceback (most recent call last):
+  File "app.py", line 3, in <module>
+    time.sleep(60)
+KeyboardInterrupt

@@ -219,6 +219,52 @@ func TestMatcherDefensive(t *testing.T) {
 	next, accepted := matcher{}.Step("plain", []int{statePartial})
 	assert.Empty(t, next)
 	assert.Equal(t, -1, accepted)
+
+	// A closed run is reported final, so the aggregator never steps out of
+	// stateFull; the guard stays as the backstop for a Next stage wired up
+	// without the FinalMatcher fast path.
+	assert.True(t, matcher{}.Final(stateFull))
+	assert.False(t, matcher{}.Final(statePartial))
+	next, accepted = matcher{}.Step("2024-01-01T10:00:00.000000001Z stdout P x", []int{stateFull})
+	assert.Empty(t, next)
+	assert.Equal(t, -1, accepted)
+
+	// A full line with no fragments pending never opens a group. AddParsed
+	// short-circuits that case before the matcher sees it, so this too is only
+	// reachable by calling the matcher directly.
+	next, accepted = matcher{}.Step("2024-01-01T10:00:00.000000001Z stdout F x", []int{stateStart})
+	assert.Empty(t, next)
+	assert.Equal(t, -1, accepted)
+}
+
+// TestRejoinIsImmediate verifies that the "F" line closing a run hands the
+// rejoined line on at once: it is definitive, so nothing waits for the
+// stream's next line.
+func TestRejoinIsImmediate(t *testing.T) {
+	a, got := pipeline(t)
+	ctx := context.Background()
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stdout P first, ", 0))
+	assert.Empty(t, *got)
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000002Z stdout F last", 1))
+
+	assert.Len(t, *got, 1)
+	assert.Equal(t, "first, last", (*got)[0].line)
+	assert.False(t, a.Pending("c1"))
+	assert.Zero(t, a.Bytes())
+}
+
+// TestPending verifies the per-key gauge across both streams.
+func TestPending(t *testing.T) {
+	a, _ := pipeline(t)
+	ctx := context.Background()
+	assert.False(t, a.Pending("c1"))
+
+	assert.NoError(t, a.Add(ctx, "c1", "2024-01-01T10:00:00.000000001Z stderr P frag", 0))
+	assert.True(t, a.Pending("c1"))
+	assert.False(t, a.Pending("c2"))
+
+	assert.NoError(t, a.Flush(ctx, "c1"))
+	assert.False(t, a.Pending("c1"))
 }
 
 // TestNonCRIPassThrough verifies that lines that are not CRI-formatted reach
