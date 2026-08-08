@@ -124,10 +124,10 @@ func TestStateNamespacing(t *testing.T) {
 }
 
 // TestMaxActiveStates verifies the active-set cap: a line matching many
-// transitions tracks at most maxActiveStates distinct states.
+// transitions tracks at most MaxActiveStates distinct states.
 func TestMaxActiveStates(t *testing.T) {
 	states := []State{{Name: StartState}}
-	for i := range maxActiveStates + 5 {
+	for i := range MaxActiveStates + 5 {
 		name := string(rune('a' + i))
 		states[0].Transitions = append(states[0].Transitions, Transition{Pattern: `^match`, Next: name})
 		states = append(states, State{Name: name})
@@ -136,5 +136,5 @@ func TestMaxActiveStates(t *testing.T) {
 	assert.NoError(t, err)
 
 	next, _ := sm.Step("match this", []int{0})
-	assert.Len(t, next, maxActiveStates)
+	assert.Len(t, next, MaxActiveStates)
 }

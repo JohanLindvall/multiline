@@ -4,8 +4,8 @@
 // completed entries are handed to an [Emitter] callback.
 //
 // The bundled matcher recognizes Go, Java (and Node.js), Python, .NET, Ruby,
-// Rust and PHP stack traces; custom formats are declared in the patterns
-// subpackage and selected with [WithMatcher].
+// Rust, PHP and Elixir stack traces; custom formats are declared in the
+// patterns subpackage and selected with [WithMatcher].
 package multiline
 
 import (
@@ -53,9 +53,19 @@ type Entry[T any] struct {
 	Truncated bool
 }
 
-// Emitter receives completed entries. Returning an error aborts the Add or
-// flush call that produced the entry; lines already buffered in the same
-// group are not re-delivered.
+// Emitter receives completed entries. Returning an error is reported by the
+// Add or flush call that produced the entry, and the first such error wins.
+// It does not abort that call: an Add still accounts for its own line, which
+// is buffered or emitted even when a flush it triggered failed. Lines already
+// buffered in the same group are not re-delivered.
+//
+// An emitter may feed the same Aggregator again — that is how stages are
+// chained — but one that re-enters under the key it is currently handling
+// must make progress rather than add a line unconditionally: the call that
+// triggered the flush drains whatever the emitter left under that key before
+// claiming it, and draining runs the emitter once more. An emitter that
+// answers every entry with another line for the same key therefore never
+// settles. Feeding a different key, or a different Aggregator, is unaffected.
 type Emitter[T any] func(ctx context.Context, entry Entry[T]) error
 
 // Matcher decides how successive lines are grouped. Implementations track
@@ -70,7 +80,9 @@ type Matcher interface {
 	// not retain or modify the active slice; the aggregator retains the
 	// returned slice until the group's next line, so implementations must
 	// return slices they will never mutate (shared immutable slices are
-	// fine).
+	// fine). accepted need not be a member of next: an implementation that
+	// bounds the size of the active set may report the state the line landed
+	// in without tracking it (see patterns.MaxActiveStates).
 	Step(line string, active []int) (next []int, accepted int)
 	// Format returns the format name reported as [Entry].Match for a group
 	// that completed in the state at index.
@@ -94,9 +106,6 @@ type FinalMatcher interface {
 // defaultMatcher recognizes the stack-trace formats bundled in the patterns
 // subpackage.
 var defaultMatcher Matcher = patterns.MustCompile(patterns.All...)
-
-// startStates is the active set a new group is matched from.
-var startStates = []int{0}
 
 // lineAux rides alongside each retained line of a group.
 type lineAux[T any] struct {
@@ -156,11 +165,23 @@ type Aggregator[T any] struct {
 	// see the Texts of the entry it is still handling change under it.
 	scratch []string
 	depth   int
+
+	// start is the active set a new group is matched from, held per aggregator
+	// rather than in a package-level slice: a third-party Matcher that ignores
+	// the "must not modify active" rule then corrupts only its own aggregator.
+	start [1]int
 }
 
 // Free-list bounds: enough groups to cover the churn of a busy stream without
 // pinning much, and a line-buffer ceiling so one huge trace does not leave a
 // large array parked on the list.
+//
+// maxFreeGroups is not a concurrency limit: the streaming path releases a
+// key's group and allocates the next one for that same key in the very next
+// statement, so reuse is allocation-free at any number of concurrently open
+// traces (measured at 1 through 256). It only bounds a bulk release —
+// FlushBefore, Stop, or a Flush-per-key loop — where more than maxFreeGroups
+// groups are freed back-to-back with no interleaved allocation.
 const (
 	maxFreeGroups = 4
 	maxFreeLines  = 64
@@ -213,10 +234,15 @@ func WithMaxGroups(n int) Option {
 // WithMaxTotalBytes caps the text bytes retained across all groups (the gauge
 // [Aggregator.Bytes] reports). When a line pushes the total over the cap, the
 // least recently touched groups are flushed until it fits again. A value <= 0
-// means unlimited. Unlike WithMaxGroups x WithMaxBytes, this bounds the
-// aggregator's memory directly, whatever the key cardinality. The most
-// recently touched group is never evicted, so pair this with [WithMaxBytes] to
-// bound a single group too.
+// means unlimited. Unlike WithMaxGroups x WithMaxBytes, it bounds retained
+// text whatever the key cardinality. The most recently touched group is never
+// evicted, so pair this with [WithMaxBytes] to bound a single group too.
+//
+// It bounds retained text only: the per-group overhead (the group itself, its
+// key, its map entry and slice backing — on the order of a few hundred bytes)
+// is not charged against the cap, so a workload of very short lines spread
+// over very many keys can hold considerably more than the configured budget.
+// Pair it with [WithMaxGroups] to bound that too.
 func WithMaxTotalBytes(n int) Option {
 	return func(c *config) { c.maxTotalBytes = n }
 }
@@ -318,9 +344,19 @@ func (a *Aggregator[T]) AddAt(ctx context.Context, key, line string, when time.T
 		held = a.flush(ctx, g)
 	}
 
-	next, _ := a.matcher.Step(line, startStates)
+	next, _ := a.matcher.Step(line, a.start[:])
 	if len(next) == 0 {
 		return firstErr(held, a.emitLine(ctx, Entry[T]{Key: key, When: when, Lines: 1, Data: data}, line))
+	}
+
+	// The flush above ran the emitter, which may have re-entered this
+	// aggregator under this same key and left a group behind. Drain it before
+	// claiming the map entry, or the two groups would share a key: one
+	// reachable through the map, one orphaned in the last-touched list. Each
+	// drain re-enters the emitter in turn, so re-read until the key is free.
+	for old := a.groups[key]; old != nil; old = a.groups[key] {
+		a.unlink(old)
+		held = firstErr(held, a.flush(ctx, old))
 	}
 
 	// The accepted result is deliberately ignored here: an aggregated entry
@@ -509,7 +545,12 @@ func (a *Aggregator[T]) append(g *group[T], line string, when time.Time, data T)
 			}
 			avail = 0
 		}
-		line = line[:avail]
+		// Clone rather than reslice: a Go substring shares its backing array,
+		// so retaining line[:avail] would pin the whole original line while
+		// only avail bytes are charged to g.bytes/a.bytes — the cap would
+		// report a bound it does not hold, and evict would never see the
+		// difference. This is the cold path, taken at most once per group.
+		line = strings.Clone(line[:avail])
 	}
 
 	g.lines = append(g.lines, line)
@@ -531,13 +572,19 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 
 	if tail > 0 {
 		e := Entry[T]{
-			Texts:     g.lines[:tail:tail],
-			Key:       g.key,
-			Match:     g.match,
-			When:      g.aux[0].when,
-			Data:      g.aux[0].data,
-			Lines:     g.acceptedTotal,
-			Truncated: g.capped,
+			Texts: g.lines[:tail:tail],
+			Key:   g.key,
+			Match: g.match,
+			When:  g.aux[0].when,
+			Data:  g.aux[0].data,
+			Lines: g.acceptedTotal,
+			// append retains nothing once g.capped is set, so the cut line is
+			// always the last retained one and every dropped line follows it.
+			// The aggregated prefix therefore only lost text when it runs to
+			// the end of the retained lines; otherwise the flag belongs to the
+			// last individually emitted line below, which is also the entry
+			// charged with the dropped count.
+			Truncated: g.capped && tail == len(g.lines),
 		}
 		if tail == len(g.lines) {
 			e.Lines += dropped
@@ -557,9 +604,7 @@ func (a *Aggregator[T]) flush(ctx context.Context, g *group[T]) error {
 		}
 		if i == len(g.lines)-1 {
 			e.Lines += dropped
-			if tail == 0 && g.capped {
-				e.Truncated = true
-			}
+			e.Truncated = g.capped
 		}
 		if err := a.emit(ctx, e); err != nil {
 			return err
@@ -618,11 +663,15 @@ func (a *Aggregator[T]) detach(g *group[T]) {
 	g.next = nil
 }
 
-// unlink removes g from the last-touched list and the key map.
+// unlink removes g from the last-touched list and the key map. The map entry
+// is dropped by identity: under emitter re-entrancy another group may already
+// have claimed the key, and deleting by name alone would strand it.
 func (a *Aggregator[T]) unlink(g *group[T]) {
 	a.detach(g)
 	a.bytes -= g.bytes
-	delete(a.groups, g.key)
+	if a.groups[g.key] == g {
+		delete(a.groups, g.key)
+	}
 }
 
 // link appends g to the tail of the last-touched list.

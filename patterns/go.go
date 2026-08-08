@@ -34,6 +34,11 @@ var Go = StateSet{Name: "go", States: []State{
 		Name: "after_panic",
 		Transitions: append([]Transition{
 			{Pattern: `^\[signal `, Next: "after_signal"},
+			// A panic raised while another is unwinding (a deferred panic, or
+			// the "[recovered]" form) repeats the chain indented one tab per
+			// level before the goroutine blocks start. Without this the outer
+			// panic line is emitted alone and the inner one re-opens the group.
+			{Pattern: `^\t+panic: `, Next: "after_panic"},
 		}, goResume...),
 	},
 	{

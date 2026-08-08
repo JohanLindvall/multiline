@@ -30,6 +30,12 @@ var Rust = StateSet{Name: "rust", States: []State{
 	{
 		Name: "message",
 		Transitions: []Transition{
+			// assert_eq!/assert_ne! print their operands on two further lines,
+			// which otherwise end the panic at its first message line and
+			// split off the note or backtrace. Both are indented ("  left: 1"
+			// / " right: 2"), so requiring the indent costs nothing and keeps
+			// an unrelated column-0 "left: ..." line out of the panic.
+			{Pattern: `^ +(left|right): `, Next: "message"},
 			{Pattern: "^note: run with `RUST_BACKTRACE=", Next: "note"},
 			{Pattern: `^stack backtrace:$`, Next: "backtrace"},
 		},

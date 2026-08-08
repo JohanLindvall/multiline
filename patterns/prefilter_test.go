@@ -11,6 +11,28 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// corpusLines returns every line of every corpus file under tests/. Both
+// differential tests replay the real corpus, so they share one reader.
+func corpusLines(t *testing.T) []string {
+	t.Helper()
+	var lines []string
+	err := filepath.WalkDir("../tests", func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		file, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, line := range bytes.Split(file, []byte("\n")) {
+			lines = append(lines, string(line))
+		}
+		return nil
+	})
+	assert.NoError(t, err)
+	return lines
+}
+
 func TestRequiredLiterals(t *testing.T) {
 	for _, tc := range []struct {
 		pattern string
@@ -35,12 +57,16 @@ func TestRequiredLiterals(t *testing.T) {
 		{`invalid(`, nil, false},
 		// An alternation with an empty branch still product-expands.
 		{`xy(abc|)def`, []string{"xyabcdef", "xydef"}, true},
-		// Too many alternation branches exceed the product cap; the trailing
+		// Single-rune alternations are factored to a character class, so the
+		// exact run breaks before the product cap is consulted; the trailing
 		// child literal is still provable on its own.
 		{`(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)xyz`, []string{"xyz"}, true},
-		// A product exceeding the length cap falls back to the most selective
-		// single child literal.
-		{strings.Repeat("A", 40) + `(x|y)` + strings.Repeat("B", 30),
+		// A product exceeding the length cap (40+2+30 > maxProductLen) falls
+		// back to the most selective single child literal. The branches must
+		// be multi-rune: the parser folds a single-rune alternation into a
+		// character class, which breaks the exact run before the cap is ever
+		// consulted.
+		{strings.Repeat("A", 40) + `(?:xx|yy)` + strings.Repeat("B", 30),
 			[]string{strings.Repeat("A", 40)}, true},
 		// Single-rune alternations are factored to character classes by the
 		// parser, so the run breaks and the branch literals are unioned.
@@ -76,17 +102,26 @@ func TestRequiredLiterals(t *testing.T) {
 func TestStartLiteralsDedupe(t *testing.T) {
 	sm := MustCompile(StateSet{Name: "a", States: []State{
 		{Name: StartState, Transitions: []Transition{
-			{Pattern: `foobar(!|)`, Next: "s"}, // {"foobar!", "foobar"}: same transition, "foobar!" folds
-			{Pattern: `foobar`, Next: "t"},     // exact duplicate literal: same probe, mask union
-			{Pattern: `xxfoobarxx`, Next: "u"}, // contains "foobar" but implies a new transition: kept
+			// Two literals for one transition, the longer containing the
+			// shorter: "xxabcdxx" implies nothing "abcd" does not already
+			// imply, so it folds away and is never scanned for. A line
+			// carrying it still hits, since it necessarily contains "abcd".
+			{Pattern: `abcd|xxabcdxx`, Next: "s"},
+			{Pattern: `abcd`, Next: "t"},     // exact duplicate literal: same probe, mask union
+			{Pattern: `zzabcdzz`, Next: "u"}, // contains "abcd" but implies a new transition: kept
 		}},
 		{Name: "s"},
 		{Name: "t"},
 		{Name: "u"},
 	}})
-	assert.Equal(t, []string{"foobar", "xxfoobarxx"}, sm.StartLiterals())
+	assert.Equal(t, []string{"abcd", "zzabcdzz"}, sm.StartLiterals(),
+		`"xxabcdxx" folded into "abcd"; "zzabcdzz" was kept because folding it would drag transition 2 in`)
 	assert.Equal(t, []uint64{1<<0 | 1<<1, 1 << 2}, sm.pf.masks)
-	assert.Equal(t, []int16{-1, 0}, sm.pf.parents, `"xxfoobarxx" is skipped when "foobar" misses`)
+	assert.Equal(t, []int16{-1, 0}, sm.pf.parents, `"zzabcdzz" is skipped when "abcd" misses`)
+
+	// The fold must not cost a decision: the folded-away literal still selects
+	// its transition, via the stem it folded into.
+	assert.Equal(t, uint64(1<<0|1<<1), sm.pf.scan("... xxabcdxx ..."))
 }
 
 // TestBundledPrefilterEnabled guards the bundled sets: a new start pattern
@@ -122,7 +157,8 @@ func TestCompileWithoutProvableLiterals(t *testing.T) {
 	}})
 	assert.NoError(t, err)
 	assert.Nil(t, sm.StartLiterals())
-	assert.Nil(t, sm.UnfilteredStarts(), "with no prefilter at all there is nothing to report")
+	assert.Equal(t, []string{`^[A-Z]+$`}, sm.UnfilteredStarts(),
+		"a machine with no prefilter at all runs every start regex on every line — the worst case, so it must report every pattern rather than look healthy")
 
 	next, accepted := sm.Step("HEADER", []int{0})
 	assert.NotEmpty(t, next)
@@ -159,20 +195,7 @@ func TestPrefilterDifferential(t *testing.T) {
 		"main.rb:4:in `foo': boom (NoMethodError)",
 		"é ünicode Ërror: line",
 	}
-	err := filepath.WalkDir("../tests", func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		file, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		for _, line := range bytes.Split(file, []byte("\n")) {
-			lines = append(lines, string(line))
-		}
-		return nil
-	})
-	assert.NoError(t, err)
+	lines = append(lines, corpusLines(t)...)
 
 	for _, line := range lines {
 		gotNext, gotAccepted := filtered.Step(line, []int{0})
@@ -254,8 +277,8 @@ func TestPrefilterMasks(t *testing.T) {
 	}
 
 	// Start-transition order follows the set order in All: go declares
-	// transitions 0-3, dotnet 4, java 5-7, nodejs 8-9, python 10, ruby 11,
-	// rust 12, php 13, elixir 14. Folding is subset-only, so the probes of
+	// transitions 0-3, dotnet 4, java 5-7, nodejs 8-9, python 10, ruby 11-12,
+	// rust 13, php 14, elixir 15. Folding is subset-only, so the probes of
 	// java's expensive unanchored headline ("Error:") stay separate from the
 	// bare-word probes of its anchored message-less headline ("Error"); the
 	// scan instead skips the longer probe via its parent when the stem misses.
@@ -276,9 +299,12 @@ func TestPrefilterMasks(t *testing.T) {
 	assert.Equal(t, uint64(1<<10), maskOf("Traceback (most recent call last):"))
 	assert.Equal(t, uint64(1<<11), maskOf("Error)"))
 	assert.Equal(t, uint64(1<<11), maskOf("Exception)"))
-	assert.Equal(t, uint64(1<<12), maskOf("' panicked at "))
-	assert.Equal(t, uint64(1<<13), maskOf("Fatal error:"))
-	assert.Equal(t, uint64(1<<14), maskOf("** ("))
+	assert.Equal(t, uint64(1<<11), maskOf("Timeout)"))
+	assert.Equal(t, uint64(1<<11), maskOf("NotFound)"))
+	assert.Equal(t, uint64(1<<12), maskOf(" (Errno::"))
+	assert.Equal(t, uint64(1<<13), maskOf("' panicked at "))
+	assert.Equal(t, uint64(1<<14), maskOf("Fatal error:"))
+	assert.Equal(t, uint64(1<<15), maskOf("** ("))
 	assert.Zero(t, sm.pf.always)
 	assert.False(t, sm.pf.wide)
 
@@ -294,6 +320,20 @@ func TestPrefilterMasks(t *testing.T) {
 	assert.Equal(t, "Throwable", parentOf("Throwable:"))
 	assert.Equal(t, "", parentOf("panic: "))
 	assert.Equal(t, "", parentOf("Unhandled exception. "), "case-sensitive: no parent")
+
+	// Ruby's headline is what keeps ordinary Ruby-adjacent lines off the
+	// regexes: its probes are the rare class suffixes, not the ":in " that a
+	// Rails backtrace line or a JSON caller field carries constantly. Anchoring
+	// the pattern on ":in " instead measured 8-22x slower at Step for those
+	// lines, because this regex is expensive to fail.
+	const rubyBit = uint64(1<<11 | 1<<12)
+	for _, line := range []string{
+		`{"level":"info","caller":"app/models/user.rb:42:in 'find_by_id'","msg":"ok"}`,
+		`app/controllers/x.rb:15:in 'show'`,
+		"\tfrom main.rb:8:in `baz'",
+	} {
+		assert.Zero(t, sm.pf.scan(line)&rubyBit, "line must not be a ruby candidate: %s", line)
+	}
 }
 
 // TestPrefilterDegrades verifies that a start pattern with no provable literal

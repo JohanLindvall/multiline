@@ -13,10 +13,15 @@ package patterns
 // input byte with no branching on failure links; the memory cost is ~1 KiB
 // per literal byte and is only paid by machines that cross the threshold.
 
-// acMinLiterals is the literal count at which Compile switches the prefilter
+// acMinLiterals is the probe count at which Compile switches the prefilter
 // scan from the linear Contains loop to Aho-Corasick. Chosen by benchmark
-// (BenchmarkPrefilterScan): the linear loop wins clearly at the bundled ~13
-// literals, Aho-Corasick wins from roughly twice that.
+// (BenchmarkPrefilterScan).
+//
+// It is compared against the number of *root* probes, not the total: the
+// linear scan walks the roots and reaches a child only when its parent stem
+// hit, so the roots are what a typical line actually pays for. The bundled
+// sets carry 23 probes over 16 roots, and the linear loop wins clearly there;
+// Aho-Corasick takes over from roughly twice that.
 const acMinLiterals = 24
 
 // ahoCorasick is a dense-table Aho-Corasick automaton over the probe

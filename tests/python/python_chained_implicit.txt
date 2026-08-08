@@ -1,0 +1,14 @@
+1,11,1
+worker starting
+Traceback (most recent call last):
+  File "/app/a.py", line 3, in <module>
+    boom()
+KeyError: 'x'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/app/a.py", line 5, in <module>
+    other()
+ValueError: bad
+worker done

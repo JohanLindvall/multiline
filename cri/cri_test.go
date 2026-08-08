@@ -99,8 +99,10 @@ func TestDanglingFragments(t *testing.T) {
 	assert.Len(t, *got, 2)
 }
 
-// TestNonCRIAfterFragments verifies that a non-CRI line while a fragment run
-// is open flushes the run first, in order.
+// TestNonCRIAfterFragments verifies that a non-CRI line arriving while a
+// fragment run is open does NOT flush the run: it bypasses the per-stream
+// buffer entirely and reaches the next stage first, under the bare key, while
+// the run stays pending until something flushes it.
 func TestNonCRIAfterFragments(t *testing.T) {
 	a, got := pipeline(t)
 	ctx := context.Background()
@@ -175,18 +177,9 @@ func TestAddParsed(t *testing.T) {
 	assert.NoError(t, viaAdd.Stop(ctx))
 	assert.NoError(t, viaParsed.Stop(ctx))
 
-	// The non-CRI passthrough is stamped with the current time, so compare it
-	// separately from the deterministic fields.
-	assert.Equal(t, len(*gotAdd), len(*gotParsed))
-	for i := range *gotAdd {
-		a, p := (*gotAdd)[i], (*gotParsed)[i]
-		assert.Equal(t, a.key, p.key, i)
-		assert.Equal(t, a.line, p.line, i)
-		assert.Equal(t, a.data, p.data, i)
-		if a.line != "not a CRI line at all" {
-			assert.Equal(t, a.when, p.when, i)
-		}
-	}
+	// Add and AddParsed must agree on every field, the non-CRI passthrough
+	// included — it carries a zero time on both paths.
+	assert.Equal(t, *gotAdd, *gotParsed)
 	assert.Len(t, *gotParsed, 5)
 
 	// A non-CRI stream from a trusting caller still gets a distinct key.
@@ -196,9 +189,8 @@ func TestAddParsed(t *testing.T) {
 	assert.Equal(t, "c1/weird", (*gotParsed)[5].key)
 }
 
-// TestFlushDrivenTimestamps verifies that emissions driven by Stop and
-// FlushBefore — which happen outside any Add call — still carry each
-// fragment's own log timestamp.
+// TestFlushDrivenTimestamps verifies that emissions driven by Stop — which
+// happen outside any Add call — still carry each fragment's own log timestamp.
 func TestFlushDrivenTimestamps(t *testing.T) {
 	a, got := pipeline(t)
 	ctx := context.Background()

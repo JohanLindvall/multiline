@@ -40,7 +40,7 @@ func collectBounded(t *testing.T, header, cont string, lines []string, opts ...O
 }
 
 func TestMaxLines(t *testing.T) {
-	// Five continuation lines, capped at 3 retained lines (1 header + 2
+	// Four continuation lines, capped at 3 retained lines (1 header + 2
 	// continuations); Lines still counts all 5 consumed lines.
 	lines := []string{"ERROR boom", "  1", "  2", "  3", "  4"}
 	got := collectBounded(t, `^\S`, `^\s`, lines, WithMaxLines(3))
@@ -80,9 +80,9 @@ func TestMaxBytesFirstLineMultibyte(t *testing.T) {
 	}, got)
 }
 
-// threeState builds a machine whose continuation lands in an accepting state
-// once and in a non-terminal one thereafter, so a cap can bite strictly after
-// the group's last accept.
+// threeState builds a machine whose header lands in an accepting state and
+// whose continuations all land in a non-terminal one, so a group's last accept
+// is its first line and a cap can bite strictly after it.
 func threeState(t *testing.T, emit Emitter[int], opts ...Option) *Aggregator[int] {
 	t.Helper()
 	sm, err := patterns.Compile(patterns.StateSet{Name: "test", States: []patterns.State{

@@ -151,9 +151,13 @@ func (matcher) Final(state int) bool { return state == stateFull }
 
 // Next receives each rejoined application line: the key it was added under
 // (suffixed "/stdout" or "/stderr"), the line with CRI prefixes stripped, and
-// the timestamp of its first fragment (zero for a non-CRI line passed
-// through). The AddAt method of a multiline.Aggregator satisfies Next
-// directly.
+// the timestamp of its first fragment. The AddAt method of a
+// multiline.Aggregator satisfies Next directly.
+//
+// A line that is not CRI-formatted is the exception on both counts: it keeps
+// the bare key, unsuffixed, and carries a zero time. That is what lets a
+// wholly non-CRI source degrade gracefully through this stage, but it does
+// mean one source can reach the next stage under two different keys.
 type Next[T any] func(ctx context.Context, key, line string, when time.Time, data T) error
 
 // Aggregator rejoins CRI partial lines. Like multiline.Aggregator it is not
@@ -163,21 +167,32 @@ type Aggregator[T any] struct {
 	next  Next[T]
 
 	// Cached "<key>/<stream>" strings for the previous key, so the steady
-	// state of tailing one container allocates nothing per line.
+	// state of tailing one container allocates nothing per line. cached
+	// distinguishes "no key seen yet" from a genuine empty key.
+	cached     bool
 	lastKey    string
 	lastStdout string
 	lastStderr string
 }
 
 // New creates a CRI rejoining stage in front of next. The multiline options
-// apply to the fragment buffering: WithMaxLines/WithMaxBytes bound a fragment
-// run (measured on the raw lines; an over-limit run is passed on silently
-// truncated), WithMaxGroups bounds the tracked streams. WithMatcher is
-// ignored.
+// apply to the fragment buffering, measured on the raw lines: WithMaxLines and
+// WithMaxBytes bound a single fragment run (an over-limit run is passed on
+// silently truncated), WithMaxGroups and WithMaxTotalBytes bound the tracked
+// streams, and WithClock supplies the staleness clock FlushBefore compares
+// against. Two options are not the caller's to choose: WithMatcher is
+// overridden with the CRI fragment matcher, and WithoutText is forced, since
+// rejoin consumes Entry.Texts and never needs the joined form.
 func New[T any](next Next[T], opts ...multiline.Option) *Aggregator[T] {
 	a := &Aggregator[T]{next: next}
-	// rejoin consumes Entry.Texts, so the inner aggregator never joins.
-	a.inner = multiline.New(a.rejoin, append(opts, multiline.WithMatcher(matcher{}), multiline.WithoutText())...)
+	// Copy rather than append in place: append on a variadic parameter writes
+	// into the caller's backing array whenever it has spare capacity, which
+	// would plant this stage's matcher in an option slice the caller still
+	// uses elsewhere.
+	inner := make([]multiline.Option, 0, len(opts)+2)
+	inner = append(inner, opts...)
+	inner = append(inner, multiline.WithMatcher(matcher{}), multiline.WithoutText())
+	a.inner = multiline.New(a.rejoin, inner...)
 	return a
 }
 
@@ -185,6 +200,11 @@ func New[T any](next Next[T], opts ...multiline.Option) *Aggregator[T] {
 // the container); fragment runs are buffered per key and stream, and rejoined
 // lines are handed to the [Next] stage keyed "<key>/<stream>". A line that is
 // not CRI-formatted is passed through unmodified with a zero time.
+//
+// An empty key means "do not buffer", matching the multiline.Aggregator
+// sentinel this stage feeds: fragments are stripped and handed on one by one
+// instead of being rejoined, so a logical line split into N fragments arrives
+// as N lines. Pass a real key to get rejoining.
 func (a *Aggregator[T]) Add(ctx context.Context, key, raw string, data T) error {
 	l, ok := Parse(raw)
 	return a.AddParsed(ctx, key, raw, l, ok, data)
@@ -196,7 +216,7 @@ func (a *Aggregator[T]) Add(ctx context.Context, key, raw string, data T) error 
 // a full line with no fragments pending skips buffering entirely and goes
 // straight to the [Next] stage. line and ok must be the [Parse] results of
 // raw; ok false feeds raw through unmodified as a non-CRI line with a zero
-// time.
+// time. As with [Aggregator.Add], an empty key disables rejoining.
 func (a *Aggregator[T]) AddParsed(ctx context.Context, key, raw string, line Line, ok bool, data T) error {
 	if !ok {
 		return a.next(ctx, key, raw, time.Time{}, data)
@@ -213,7 +233,8 @@ func (a *Aggregator[T]) AddParsed(ctx context.Context, key, raw string, line Lin
 // streamKeys returns key's "<key>/stdout" and "<key>/stderr" forms, cached for
 // the previous key so repeated lines from one source do not allocate.
 func (a *Aggregator[T]) streamKeys(key string) (stdout, stderr string) {
-	if key != a.lastKey {
+	if !a.cached || key != a.lastKey {
+		a.cached = true
 		a.lastKey = key
 		a.lastStdout = key + "/stdout"
 		a.lastStderr = key + "/stderr"
@@ -240,23 +261,43 @@ func (a *Aggregator[T]) streamKey(key, stream string) string {
 // It consumes Entry.Texts, so the fragments are never joined and re-split.
 func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[T]) error {
 	if len(e.Texts) == 1 {
-		if _, _, content, ok := meta(e.Texts[0]); ok {
-			return a.next(ctx, e.Key, content, e.When, e.Data)
-		}
-		// Cannot happen for lines admitted through Add/AddParsed; keep the
-		// text rather than dropping it.
-		return a.next(ctx, e.Key, e.Texts[0], e.When, e.Data)
+		return a.next(ctx, e.Key, fragmentContent(e, 0), e.When, e.Data)
 	}
 
+	// Size the builder on the content, not on the raw bytes: Builder.String
+	// hands out the whole backing array, so growing to the raw size would
+	// leave every stripped CRI prefix permanently attached to the rejoined
+	// line. Recomputing the content is two IndexByte calls per fragment,
+	// nothing against the copy the single allocation saves.
+	n := 0
+	for i := range e.Texts {
+		n += len(fragmentContent(e, i))
+	}
 	var text strings.Builder
-	for _, fragment := range e.Texts {
-		if _, _, content, ok := meta(fragment); ok {
-			text.WriteString(content)
-		} else {
-			text.WriteString(fragment)
-		}
+	text.Grow(n)
+	for i := range e.Texts {
+		text.WriteString(fragmentContent(e, i))
 	}
 	return a.next(ctx, e.Key, text.String(), e.When, e.Data)
+}
+
+// fragmentContent strips the CRI prefix from e's i'th retained fragment.
+//
+// A fragment that no longer parses was cut inside its own CRI prefix by
+// WithMaxBytes — only reachable on the last retained line of a truncated
+// entry, since append retains nothing after the cut. Its remaining bytes are
+// raw metadata (a partial timestamp, the stream name), not application text,
+// so they are dropped rather than shipped as log content. Any other parse
+// failure cannot have arrived through Add/AddParsed, so the text is kept
+// rather than silently lost.
+func fragmentContent[T any](e multiline.Entry[T], i int) string {
+	if _, _, content, ok := meta(e.Texts[i]); ok {
+		return content
+	}
+	if e.Truncated && i == len(e.Texts)-1 {
+		return ""
+	}
+	return e.Texts[i]
 }
 
 // Flush hands any pending fragments of key's stdout and stderr streams to

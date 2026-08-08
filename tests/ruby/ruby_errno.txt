@@ -1,0 +1,5 @@
+1,2,1
+starting worker
+main.rb:3:in 'IO.read': No such file or directory @ rb_sysopen - /nope (Errno::ENOENT)
+	from main.rb:3:in '<main>'
+worker done

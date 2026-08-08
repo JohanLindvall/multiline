@@ -38,11 +38,40 @@ jobs:
       - name: Test
         run: make test
 
+  # The race detector, short fuzz bursts and a single pass over the benchmarks.
+  # Kept out of the `check` matrix so the per-architecture job stays fast, but
+  # the tag job waits for this too: a data race, a conservation crasher or a
+  # benchmark that no longer builds must not reach a release tag.
+  race-and-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Test with the race detector
+        run: go test -race ./...
+      - name: Fuzz
+        run: make fuzz
+      # -benchtime=1x only proves they build and run; the numbers from a shared
+      # runner are not worth comparing.
+      - name: Benchmarks
+        run: go test -run='^$' -bench=. -benchtime=1x ./...
+      # A crasher is written to testdata/fuzz/<Fuzzer>/ and is the whole value
+      # of the run, so keep it even though the job failed.
+      - name: Upload fuzz crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
+
   # On a green main build, bump the patch of the latest vX.Y.Z tag (the Go module
   # version convention). Patch only: a major bump would require a /vN module path,
   # and minor releases are deliberate, so make those by pushing the tag by hand.
   tag:
-    needs: check
+    needs: [check, race-and-fuzz]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

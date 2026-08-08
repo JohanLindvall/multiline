@@ -1,10 +1,7 @@
 package patterns
 
 import (
-	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -63,7 +60,7 @@ func TestAhoCorasickPrefixLiterals(t *testing.T) {
 func TestAhoCorasickDifferential(t *testing.T) {
 	pf := MustCompile(All...).pf
 	assert.NotNil(t, pf)
-	assert.Nil(t, pf.ac, "bundled literal count below threshold uses the linear scan")
+	assert.Nil(t, pf.ac, "bundled root-probe count below threshold uses the linear scan")
 	ac := buildAhoCorasick(pf.literals, pf.masks)
 
 	lines := []string{
@@ -71,20 +68,7 @@ func TestAhoCorasickDifferential(t *testing.T) {
 		"Traceback (most recent call last):", "é ünicode Ërror: line",
 		strings.Repeat("Error", 100) + ":",
 	}
-	err := filepath.WalkDir("../tests", func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		file, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		for _, line := range bytes.Split(file, []byte("\n")) {
-			lines = append(lines, string(line))
-		}
-		return nil
-	})
-	assert.NoError(t, err)
+	lines = append(lines, corpusLines(t)...)
 
 	for _, line := range lines {
 		want := linearScan(pf.literals, pf.masks, line)
@@ -96,7 +80,7 @@ func TestAhoCorasickDifferential(t *testing.T) {
 }
 
 // TestPrefilterUsesAhoCorasickPastThreshold verifies Compile switches scanner
-// implementations on the literal count without changing decisions.
+// implementations on the root-probe count without changing decisions.
 func TestPrefilterUsesAhoCorasickPastThreshold(t *testing.T) {
 	start := State{Name: StartState}
 	var sets []StateSet

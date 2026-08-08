@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JohanLindvall/multiline/patterns"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,6 +29,23 @@ var corpusFormat = map[string]string{
 	"ruby":   "ruby",
 	"rust":   "rust",
 	"elixir": "elixir",
+}
+
+// TestCorpusCoversEveryBundledSet asserts that corpusFormat and patterns.All
+// name exactly the same formats. The corpus is this library's behavioral spec,
+// so a bundled set with no corpus directory ships with nothing pinning what it
+// matches — and a corpusFormat entry naming a set that no longer exists means
+// the directory is being checked against a format nothing can produce.
+func TestCorpusCoversEveryBundledSet(t *testing.T) {
+	covered := make(map[string]bool, len(corpusFormat))
+	for _, format := range corpusFormat {
+		covered[format] = true
+	}
+	for _, set := range patterns.All {
+		assert.True(t, covered[set.Name], "bundled set %q has no corpus directory", set.Name)
+		delete(covered, set.Name)
+	}
+	assert.Empty(t, covered, "corpusFormat names formats that are not bundled sets")
 }
 
 // Test_Unit_Multiline runs every file under tests/ through the default

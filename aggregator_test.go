@@ -144,6 +144,49 @@ func TestReentrantEmitter(t *testing.T) {
 	assert.Equal(t, []string{"SECOND", "FIRST"}, seen)
 }
 
+// TestReentrantEmitterSameKey covers the harder case: the emitter feeds this
+// aggregator under the very key whose flush it is handling. The re-entrant
+// line claims the key's map entry first, so the line that triggered the flush
+// must drain it rather than overwrite it — otherwise two live groups share one
+// key, one reachable through the map and one orphaned in the last-touched
+// list, and Len/Keys/Pending/Bytes stop agreeing about which. A shipper
+// draining on Len() or Pending() would then conclude the stream is empty and
+// drop the tail.
+func TestReentrantEmitterSameKey(t *testing.T) {
+	var ml *Aggregator[int]
+	var got []string
+	reentered := false
+	ml = New(func(ctx context.Context, e Entry[int]) error {
+		got = append(got, e.Text)
+		if !reentered {
+			reentered = true
+			return ml.Add(ctx, "k", "panic: reentrant", 99)
+		}
+		return nil
+	})
+	ctx := context.Background()
+
+	// "panic: y" opens a group; "panic: z" cannot continue it, so it flushes
+	// it — and that flush is where the emitter re-enters under "k".
+	assert.NoError(t, ml.Add(ctx, "k", "panic: y", 0))
+	assert.NoError(t, ml.Add(ctx, "k", "panic: z", 1))
+
+	assert.Equal(t, 1, ml.Len())
+	assert.Equal(t, []string{"k"}, ml.Keys(nil), "the map and the last-touched list must hold the same one group")
+	assert.True(t, ml.Pending("k"))
+
+	assert.NoError(t, ml.Flush(ctx, "k"))
+	assert.False(t, ml.Pending("k"))
+	assert.Equal(t, 0, ml.Len())
+	assert.Empty(t, ml.Keys(nil))
+	assert.Equal(t, 0, ml.Bytes(), "flushing the key must leave nothing buffered under it")
+
+	assert.NoError(t, ml.Stop(ctx))
+	// The re-entrant line arrived after "panic: y" was emitted and before
+	// "panic: z" was buffered, and comes out in exactly that position.
+	assert.Equal(t, []string{"panic: y", "panic: reentrant", "panic: z"}, got)
+}
+
 // TestKeys verifies that Keys reports pending keys in last-touched order.
 func TestKeys(t *testing.T) {
 	ml := New(func(_ context.Context, _ Entry[struct{}]) error { return nil })
@@ -285,8 +328,9 @@ func TestMatcherWithoutFinal(t *testing.T) {
 	assert.Equal(t, "rust", got[0].Match)
 }
 
-// TestAcceptedPrefixTruncatedTail verifies the emitter-error path of the tail
-// loop after an aggregated prefix, and that tail lines carry their own data.
+// TestAcceptedPrefixTailError verifies the emitter-error path of the tail loop
+// after an aggregated prefix: the aggregated entry emits fine, the tail line's
+// emission fails, and that error reaches the caller.
 func TestAcceptedPrefixTailError(t *testing.T) {
 	boom := errors.New("boom")
 	var texts []string

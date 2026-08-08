@@ -17,12 +17,19 @@ Use the Makefile (same shape as JohanLindvall/lightning):
 - `make bench` — benchmarks (the no-match path must stay on the prefilter
   fast path: ~105ns/line at the matcher, ~130ns/line through the
   aggregator; see below)
-- `make fuzz` — 30s bursts of both fuzzers: uncapped conservation (no line
-  lost/duplicated/reordered) and capped conservation (`Entry.Lines` sums to
-  the lines consumed under `WithMaxLines`/`WithMaxBytes`)
+- `make fuzz` — 30s bursts of all four fuzzers, one per property: uncapped
+  conservation (no line lost/duplicated/reordered), capped conservation
+  (`Entry.Lines` sums to the lines consumed under `WithMaxLines`/`WithMaxBytes`,
+  and `Truncated` lands on exactly the entry that lost text), multi-key
+  conservation (interleaved keys, `AddAt`, `FlushBefore` and both eviction
+  caps, none of which may drop text), and cri rejoin conservation (the CRI
+  stage repackages content without changing it)
 - CI (`.github/workflows/ci.yml`) mirrors lightning: one check job per arch
   (amd64+arm64) running `make test`, lint once on amd64 via
-  golangci-lint-action pinned to v2.12.2, and auto patch-tagging on green main
+  golangci-lint-action pinned to v2.12.2, a `race-and-fuzz` job (`go test
+  -race`, `make fuzz`, benchmarks at `-benchtime=1x`, uploading any crasher
+  under `testdata/fuzz/` on failure), and auto patch-tagging on green main
+  once both jobs pass
 
 ## Layout
 
@@ -78,7 +85,12 @@ don't belong there — test those with `WithMatcher` unit tests instead.
 Every corpus directory must have an entry in `corpusFormat`
 (multiline_test.go): aggregated entries are asserted to report that format
 (this is what catches one set silently claiming another's traces), and a new
-directory without an entry fails fast.
+directory without an entry fails fast. `TestCorpusCoversEveryBundledSet` closes
+the loop the other way — `corpusFormat` and `patterns.All` must name exactly
+the same formats, so a new set cannot ship without a corpus, and a stale entry
+cannot outlive its set. Every pattern-set change belongs with a corpus file:
+the gaps found in the go/python/ruby/rust sets all survived because no corpus
+described the shape.
 
 ## Gotchas
 
@@ -92,6 +104,10 @@ directory without an entry fails fast.
   becomes a permanent candidate — its regex runs on every line — while the
   rest keep filtering; `StateMachine.UnfilteredStarts()` reports these, and
   `TestBundledPrefilterEnabled` asserts it stays empty for the bundled sets.
+  The unfiltered list lives on the `StateMachine`, not inside `pf`, so it is
+  still reported when nothing at all was provable and the prefilter is off
+  outright — that case is every start regex on every line, the worst there is,
+  and it must not read as healthy.
   `TestPrefilterDifferential` proves the filter never changes a decision.
 - Prefilter probe folding is subset-only: a longer literal folds into a
   shorter contained one only when that implies no new transitions, because
@@ -110,13 +126,39 @@ directory without an entry fails fast.
   straight to the next stage — it must stay behind the `Pending(key)` check
   or fragment runs would be reordered against interleaving full lines.
 
-- `Truncated` reporting: when a capped group flushes, the flag is set on the
-  aggregated entry if there is one, else on the last individually emitted
-  line — and the cap-dropped lines are charged to that same last entry's
-  `Lines`, so `sum(Lines)` always equals the lines consumed
-  (`FuzzCappedConservation` holds this). The first line of a group is always
-  retained (cut to `""` at worst) — this is what prevents the historical
-  empty-group panic; don't "optimize" it away.
+- `Truncated` reporting: the flag marks the one entry that actually lost text,
+  which is always the last entry the flush emits — `append` retains nothing
+  once `capped` is set, so the cut line is the last retained line and every
+  dropped line follows it. So it goes on the aggregated entry only when that
+  entry runs to the end of the retained lines (`tail == len(g.lines)`),
+  otherwise on the last individually emitted line, which is also the entry
+  charged with the dropped count. `sum(Lines)` therefore always equals the
+  lines consumed, and `Truncated` is true exactly when an entry stands for
+  more lines than it retained or one of its lines was cut
+  (`FuzzCappedConservation` holds both). Don't move the flag onto the
+  aggregated entry unconditionally — the intact prefix would claim a loss that
+  happened in its neighbour. The first line of a group is always retained (cut
+  to `""` at worst) — this is what prevents the historical empty-group panic;
+  don't "optimize" it away.
+- A cap-cut line is `strings.Clone`d, never resliced: a Go substring shares its
+  backing array, so `line[:avail]` would pin the whole original line while only
+  `avail` bytes are charged to `g.bytes`/`a.bytes` — `WithMaxTotalBytes` would
+  then bound a number unrelated to the memory actually held (measured 65,000x
+  on 4 MiB lines). This is the cold path, at most once per group; don't move it
+  onto the hot path or drop it.
+- Emitter re-entrancy under the *same* key: the flush in `AddAt`'s
+  flush-then-restart path runs the emitter, which may re-enter and claim
+  `a.groups[key]` before the triggering line does. `AddAt` therefore drains the
+  key in a loop before claiming it (each drain re-enters the emitter in turn),
+  and `unlink` deletes the map entry by identity. Without the loop two live
+  groups share one key — one in the map, one orphaned in the last-touched list
+  — and `Len`/`Keys`/`Pending`/`Bytes` disagree, so a shipper draining on
+  `Len()` drops the tail. A one-shot check is not enough; `TestReentrantEmitterSameKey`
+  pins it. The drain converges only if the emitter makes progress — one that
+  answers every entry with another line for the *same* key never settles, which
+  is documented on `Emitter`. Any alternative that avoids the loop (including
+  `goto restart`) has the same property, because the regress is the emitter's,
+  not the drain's.
 - A line that triggers a flush (by not continuing its group) is processed
   even when that flush's emitter errors: the error is held, the line is
   buffered or emitted, and the first error is returned. Don't reintroduce the
@@ -136,10 +178,39 @@ directory without an entry fails fast.
   error-class prefix ("TypeError:"); only bare "Error:" headlines and the V8
   marker report `nodejs`. The two formats share the "at" frame shape and
   cannot be told apart reliably, so ambiguous traces stay `java` by design.
+- Java has no message-continuation state, deliberately — multi-line JVM
+  messages (Oracle `ORA-` chains, AssertJ blocks) do not aggregate at all. The
+  .NET-style bounded continuation was measured and rejected: it merges an
+  unrelated line between a headline and its first frame into the trace, and
+  collapses two consecutive headlines plus one frame into a single entry (a
+  case that works today). Swallowing a distinct record inside another is worse
+  for a shipper than splitting a trace. See the comment on `Java` in
+  patterns/java.go before reopening this.
+- The ruby headline must end in a parenthesised class, and its class
+  alternation is deliberately kept *adjacent to the closing paren* so the
+  prefilter derives `"Error)"`, `"Exception)"`, `"Timeout)"`, `"NotFound)"` and
+  `" (Errno::"` — rare literals, the first two of which fold in as children of
+  the existing `Error`/`Exception` roots. Anchoring on the
+  `<file>:<line>:in <method>:` shape instead covers more classes but its only
+  provable literal is `":in "`, which ordinary Ruby-adjacent lines carry
+  constantly (a Rails backtrace line, a JSON log with a caller field); every
+  one would then run this regex, which is expensive to *fail* — measured
+  1.8-4.4us, an 8-22x regression at the matcher. That was tried and reverted;
+  don't reintroduce it. `TestPrefilterMasks` pins both the probes and the
+  negative cases, and no benchmark catches this on its own (BenchmarkNoMatch's
+  line has no `":in "`). Splitting the Errno form into its own transition is
+  also load-bearing: one alternation covering both would break the exact run
+  and leave only the bare words as probes.
 - Prefilter scanning is linear strings.Contains below `acMinLiterals` probe
   literals and a dense Aho-Corasick automaton at or above it (crossover
   measured by `BenchmarkPrefilterScan`); the bundled sets stay linear. Both
-  scanners are differentially tested against each other.
+  scanners are differentially tested against each other. The threshold is
+  compared against `pf.roots`, **not** `len(pf.literals)`: the linear scan
+  walks only the roots and reaches a child solely when its parent stem hit, so
+  the roots are what a line actually pays for. The bundled sets carry 23 probes
+  over 16 roots — comparing the total would hand a set that merely grew a few
+  contained probes to the slower scanner (measured +39% to +71% through
+  `Matcher.Step`).
 - go.mod declares `go 1.22` (needs range-over-int); don't let tooling bump it
   to the local toolchain version, and don't use newer stdlib/testing APIs
   (e.g. `b.Loop`, `strings.SplitSeq`) without raising it deliberately.

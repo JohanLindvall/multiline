@@ -1,0 +1,10 @@
+1,7,1
+worker starting
+panic: first
+	panic: second [recovered]
+	panic: third
+
+goroutine 1 [running]:
+main.main()
+	/app/main.go:10 +0x18
+exit status 2

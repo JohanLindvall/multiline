@@ -24,9 +24,11 @@ import (
 // 64th, for which no mask bit is left) simply becomes a permanent candidate,
 // so its regex runs on every line while every other pattern keeps filtering.
 // Only a machine where nothing at all is provable disables the prefilter
-// outright. [StateMachine.UnfilteredStarts] reports the patterns that fell
-// back. Correctness is additionally covered by a differential test over the
-// corpus (TestPrefilterDifferential).
+// outright — and that case is the worst one, not a healthy one, so the
+// unfiltered list is kept on the StateMachine rather than inside the prefilter
+// and [StateMachine.UnfilteredStarts] still reports every pattern. Correctness
+// is additionally covered by a differential test over the corpus
+// (TestPrefilterDifferential).
 
 // prefilter maps probe literals to the start transitions they imply.
 // literals[i] hitting a line marks masks[i]'s bits of transitions[0] as
@@ -94,7 +96,9 @@ func (pf *prefilter) scan(line string) uint64 {
 
 // startPrefilter derives the prefilter from every start-state transition of
 // the given sets. ok is false only when not one probe literal could be proven,
-// leaving nothing to filter with.
+// leaving nothing to filter with; the returned prefilter is non-nil either
+// way, so its unfiltered list survives to be reported even when filtering is
+// off altogether — that case is the worst one, not a healthy one.
 func startPrefilter(sets []StateSet) (*prefilter, bool) {
 	type probe struct {
 		lit  string
@@ -136,7 +140,7 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 		}
 	}
 	if len(probes) == 0 {
-		return nil, false
+		return pf, false
 	}
 
 	// Fold literals that contain a shorter kept literal into it — but only when
@@ -180,7 +184,16 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 		}
 	}
 	pf.partition()
-	if len(pf.literals) >= acMinLiterals {
+	// Threshold on the roots, not the total: the linear scan walks only the
+	// root probes and reaches the children solely when a parent stem hit, so
+	// the roots are the count the cost model compares against. Using the total
+	// would hand a set that merely grew a few contained probes (the bundled
+	// sets already carry seven) to the slower scanner.
+	//
+	// The total is still a backstop, because a stem hit walks the whole child
+	// region: a set with few roots but very many children would otherwise pay
+	// an unbounded linear walk every time one common stem matches.
+	if pf.roots >= acMinLiterals || len(pf.literals) >= 2*acMinLiterals {
 		pf.ac = buildAhoCorasick(pf.literals, pf.masks)
 	}
 	return pf, true
@@ -189,9 +202,10 @@ func startPrefilter(sets []StateSet) (*prefilter, bool) {
 // partition reorders the probes so the roots (no parent) come first, followed
 // by the children, with parents remapped to the new root indices. The scan
 // then walks the roots unconditionally and enters the child region only when
-// a parent root hit. A child whose parent lands past bit 63 of the hits
-// bitmap is promoted to a root (checked unconditionally); children are never
-// parents themselves, so promotion cannot cascade.
+// a parent root hit. Every remapped parent keeps a bit in the hits bitmap: the
+// fold loop only records a parent below index 64, and reindexing roots in
+// ascending order can only lower an index, so a parent's new index is at most
+// its old one.
 func (pf *prefilter) partition() {
 	n := len(pf.literals)
 	newIndex := make([]int16, n)
@@ -199,12 +213,6 @@ func (pf *prefilter) partition() {
 	roots := 0
 	for i := range n {
 		if pf.parents[i] < 0 {
-			isRoot[i], newIndex[i] = true, int16(roots)
-			roots++
-		}
-	}
-	for i := range n {
-		if !isRoot[i] && newIndex[pf.parents[i]] >= 64 {
 			isRoot[i], newIndex[i] = true, int16(roots)
 			roots++
 		}
@@ -254,7 +262,11 @@ func requiredLiterals(pattern string) ([]string, bool) {
 func literalsOf(re *syntax.Regexp) ([]string, bool) {
 	switch re.Op {
 	case syntax.OpLiteral:
-		if re.Flags&syntax.FoldCase != 0 || len(re.Rune) < 3 {
+		// Length is measured in bytes, like every other gate here and like the
+		// strings.Contains the probe ends up in; len(re.Rune) would count
+		// runes and reject a short multibyte literal that is a perfectly good
+		// probe.
+		if re.Flags&syntax.FoldCase != 0 || len(string(re.Rune)) < 3 {
 			// Case-folded or too short to be a useful (selective) probe.
 			return nil, false
 		}
@@ -309,6 +321,15 @@ func literalsOf(re *syntax.Regexp) ([]string, bool) {
 				return nil, false
 			}
 			all = append(all, ls...)
+			// Bound the union like exactSet does. Every probe is scanned on
+			// the hot path and, past acMinLiterals, is also baked into a dense
+			// Aho-Corasick table costing ~1 KiB per literal byte, so a pattern
+			// with very many distinct branches is better served by running its
+			// regex on every line (it degrades to an "always" transition and
+			// is reported by StateMachine.UnfilteredStarts).
+			if len(all) > maxProductSet {
+				return nil, false
+			}
 		}
 		return all, true
 	case syntax.OpCapture, syntax.OpPlus:

@@ -1,0 +1,10 @@
+1,7,1
+worker starting
+Traceback (most recent call last):
+  File "/app/a.py", line 3, in <module>
+    f()
+  [Previous line repeated 1 more time]
+  File "/app/b.py", line 9, in g
+    h()
+ValueError: bad
+worker done

@@ -23,13 +23,19 @@ test:
 bench:
 	go test -run='^$$' -bench=. -benchmem ./...
 
-# Run the conservation fuzzers — uncapped (no line lost, duplicated, or
-# reordered) and capped (Lines accounting and truncation flagging under
-# WithMaxLines/WithMaxBytes) — for short bounded bursts; CI-friendly. Drop
-# -fuzztime for a long local hunt.
+# Run the conservation fuzzers for short bounded bursts; CI-friendly. Drop
+# -fuzztime for a long local hunt. One fuzzer per property:
+#   Conservation         no line lost, duplicated or reordered, no caps
+#   CappedConservation   Lines accounting and per-entry Truncated attribution
+#                        under WithMaxLines/WithMaxBytes
+#   MultiKeyConservation interleaved keys, AddAt, FlushBefore and the eviction
+#                        caps, none of which may drop text
+#   RejoinConservation   the CRI stage repackages content without changing it
 fuzz:
 	go test -fuzz='^FuzzConservation$$' -fuzztime=30s .
 	go test -fuzz='^FuzzCappedConservation$$' -fuzztime=30s .
+	go test -fuzz='^FuzzMultiKeyConservation$$' -fuzztime=30s .
+	go test -fuzz='^FuzzRejoinConservation$$' -fuzztime=30s ./cri
 
 # Force-install the latest version of each developer tool. Unlike a file target,
 # a phony recipe runs every time, so @latest is actually re-fetched.

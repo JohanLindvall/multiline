@@ -53,7 +53,7 @@ type State struct {
 // StateSet is a named group of states describing one multi-line format. The
 // set's Name is reported as the Match of entries it aggregated (for the
 // bundled sets: "go", "java", "nodejs", "python", "dotnet", "ruby", "rust",
-// "php").
+// "php", "elixir").
 type StateSet struct {
 	Name   string
 	States []State
@@ -81,14 +81,19 @@ type StateMachine struct {
 	// only the transitions that literal implies. nil disables the prefilter
 	// (see StartLiterals).
 	pf *prefilter
+
+	// unfiltered lists the start patterns no probe could be proven for, held
+	// outside pf so it is still reported when the prefilter is disabled
+	// outright — the case in which every start pattern is unfiltered.
+	unfiltered []string
 }
 
 // Compile builds a [StateMachine] from the given sets. Each set contributes
 // its [StartState] transitions to the shared start state (index 0); all other
 // state names are scoped to their set, so sets cannot collide. Compile
-// reports an error for an empty or duplicate set name, a transition that
-// references an unknown state, an invalid pattern, or State entries that
-// share a name but disagree on NonTerminal.
+// reports an error for an empty or duplicate set name, a state with an empty
+// name, a transition that references an unknown state, an invalid pattern, or
+// State entries that share a name but disagree on NonTerminal.
 func Compile(sets ...StateSet) (*StateMachine, error) {
 	sm := &StateMachine{
 		transitions: make([][]compiledTransition, 1),
@@ -144,7 +149,9 @@ func Compile(sets ...StateSet) (*StateMachine, error) {
 		}
 	}
 
-	if pf, ok := startPrefilter(sets); ok {
+	pf, filtering := startPrefilter(sets)
+	sm.unfiltered = pf.unfiltered
+	if filtering {
 		sm.pf = pf
 	}
 	sm.singles = make([][]int, len(sm.format))
@@ -165,9 +172,14 @@ func MustCompile(sets ...StateSet) *StateMachine {
 	return sm
 }
 
-// maxActiveStates bounds how many distinct states Step tracks for a single
-// line, guarding against a pathological matcher blowing up the active set.
-const maxActiveStates = 20
+// MaxActiveStates bounds how many distinct states [StateMachine.Step] tracks
+// for a single line, guarding against a pathological set blowing up the active
+// set. It counts the distinct successor states one line reaches from the
+// current active set, not the transitions declared on a state: the bundled
+// sets declare 15 transitions on the start state alone but never exceed an
+// active width of 3. A set whose successors can genuinely exceed this on one
+// line will have the excess dropped in declaration order — see Step.
+const MaxActiveStates = 20
 
 // Step implements the multiline.Matcher interface. It applies line to the
 // transitions of the active states and returns the new active set, plus the
@@ -180,13 +192,18 @@ const maxActiveStates = 20
 // prefilter without running any regex, and lines that hit a probe literal
 // run only the start transitions that literal implies (see
 // [StateMachine.StartLiterals]).
+//
+// next holds at most [MaxActiveStates] states; a line reaching more has the
+// excess dropped in transition-declaration order. accepted is reported for the
+// state the line genuinely landed in even when that state was among the
+// dropped ones, so callers must not assume accepted appears in next.
 func (s *StateMachine) Step(line string, active []int) (next []int, accepted int) {
 	if s.pf != nil && len(active) == 1 && active[0] == 0 {
 		return s.stepStart(line)
 	}
 
 	accepted = -1
-	var buf [maxActiveStates]int
+	var buf [MaxActiveStates]int
 	n := 0
 	for _, state := range active {
 		for _, tr := range s.transitions[state] {
@@ -196,7 +213,7 @@ func (s *StateMachine) Step(line string, active []int) (next []int, accepted int
 			if accepted < 0 && !s.nonTerminal[tr.next] {
 				accepted = tr.next
 			}
-			if n < maxActiveStates && !slices.Contains(buf[:n], tr.next) {
+			if n < MaxActiveStates && !slices.Contains(buf[:n], tr.next) {
 				buf[n] = tr.next
 				n++
 			}
@@ -215,7 +232,7 @@ func (s *StateMachine) stepStart(line string) (next []int, accepted int) {
 		return nil, accepted
 	}
 
-	var buf [maxActiveStates]int
+	var buf [MaxActiveStates]int
 	n := 0
 	for i, tr := range s.transitions[0] {
 		// Transitions past bit 63 have no mask bit and always run; see
@@ -229,7 +246,7 @@ func (s *StateMachine) stepStart(line string) (next []int, accepted int) {
 		if accepted < 0 && !s.nonTerminal[tr.next] {
 			accepted = tr.next
 		}
-		if n < maxActiveStates && !slices.Contains(buf[:n], tr.next) {
+		if n < MaxActiveStates && !slices.Contains(buf[:n], tr.next) {
 			buf[n] = tr.next
 			n++
 		}
@@ -286,9 +303,11 @@ func (s *StateMachine) StartLiterals() []string {
 // case-sensitive literal of at least three bytes, plus any past the 64th start
 // transition. A set worth adding to a hot path should keep this empty — it is
 // the difference between roughly 100ns and several microseconds per line.
+//
+// It reports the patterns whether or not the prefilter ended up enabled, so a
+// machine for which nothing at all was provable — every start regex running on
+// every line, the worst case there is — lists all of them rather than looking
+// healthy.
 func (s *StateMachine) UnfilteredStarts() []string {
-	if s.pf == nil {
-		return nil
-	}
-	return slices.Clone(s.pf.unfiltered)
+	return slices.Clone(s.unfiltered)
 }

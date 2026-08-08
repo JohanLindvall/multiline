@@ -2,8 +2,12 @@ package multiline
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // FuzzConservation asserts that with no caps configured, aggregation neither
@@ -86,11 +90,26 @@ func FuzzCappedConservation(f *testing.F) {
 			// retained line must be a prefix of the input line it stands for —
 			// which also pins down alignment, catching a lost or reordered
 			// line.
+			//
+			// intact tracks whether this entry lost anything at all: it
+			// stands for more lines than it retained, or one of its lines was
+			// cut. Truncated must say exactly that, on exactly this entry —
+			// flagging the neighbour instead would send a consumer looking
+			// for the missing text in the wrong record.
+			intact := e.Lines == len(e.Texts)
 			for i, text := range e.Texts {
 				if !strings.HasPrefix(lines[consumed+i], text) {
 					t.Fatalf("line %d is %q, not a prefix of input %q",
 						consumed+i, text, lines[consumed+i])
 				}
+				if text != lines[consumed+i] {
+					intact = false
+				}
+			}
+			if e.Truncated == intact {
+				t.Fatalf("Truncated=%v but entry %q stands for %d lines, retained %d, of input %q",
+					e.Truncated, e.Text, e.Lines, len(e.Texts),
+					strings.Join(lines[consumed:min(consumed+e.Lines, len(lines))], "\n"))
 			}
 			consumed += e.Lines
 			return nil
@@ -108,6 +127,72 @@ func FuzzCappedConservation(f *testing.F) {
 		if consumed != len(lines) {
 			t.Fatalf("accounted for %d of %d lines (maxLines=%d maxBytes=%d, truncated=%v)",
 				consumed, len(lines), maxLines, maxBytes, truncated)
+		}
+	})
+}
+
+// FuzzMultiKeyConservation covers the paths the other two fuzzers do not
+// reach: several interleaved keys, AddAt with caller-supplied times, time-based
+// flushing, and both eviction caps. None of those may drop text — they only
+// force a group to be emitted sooner — so each key's entries must still
+// concatenate back to exactly the lines fed under that key, and the aggregator
+// must be empty afterwards.
+func FuzzMultiKeyConservation(f *testing.F) {
+	f.Add("panic: a\n\ngoroutine 1 [running]:\nmain.main()\n\t/x.go:1 +0x1\ndone", 2, 3, 64)
+	f.Add("java.lang.NullPointerException: x\n\tat a.b(C.java:1)\nplain\npanic: z\n\ngoroutine 5 [running]:", 3, 0, 0)
+	f.Add("no\ntraces\nhere\nat all", 4, 1, 8)
+	f.Add("", 1, 0, 0)
+
+	f.Fuzz(func(t *testing.T, input string, keys, maxGroups, maxTotalBytes int) {
+		keys = abs(keys)%4 + 1
+		maxGroups = abs(maxGroups) % 5           // 0 means unlimited
+		maxTotalBytes = abs(maxTotalBytes) % 128 // 0 means unlimited
+		lines := strings.Split(input, "\n")
+
+		want := make(map[string][]string, keys)
+		for i, line := range lines {
+			key := fmt.Sprintf("k%d", i%keys)
+			want[key] = append(want[key], line)
+		}
+
+		got := make(map[string][]string, keys)
+		ml := New(func(_ context.Context, e Entry[int]) error {
+			if joined := strings.Join(e.Texts, "\n"); joined != e.Text {
+				t.Fatalf("Texts %q does not mirror Text %q", joined, e.Text)
+			}
+			if e.Truncated || e.Lines != len(e.Texts) {
+				t.Fatalf("entry %q lost lines to an eviction cap: Lines=%d retained=%d truncated=%v",
+					e.Text, e.Lines, len(e.Texts), e.Truncated)
+			}
+			got[e.Key] = append(got[e.Key], e.Texts...)
+			return nil
+		}, WithMaxGroups(maxGroups), WithMaxTotalBytes(maxTotalBytes))
+
+		ctx := context.Background()
+		base := time.Unix(1000, 0)
+		for i, line := range lines {
+			at := base.Add(time.Duration(i) * time.Millisecond)
+			if err := ml.AddAt(ctx, fmt.Sprintf("k%d", i%keys), line, at, i); err != nil {
+				t.Fatal(err)
+			}
+			// Periodically retire whatever has gone stale, so the time-based
+			// path interleaves with the caps rather than only running at the end.
+			if i%7 == 6 {
+				if err := ml.FlushBefore(ctx, at.Add(-2*time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := ml.Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		if !maps.EqualFunc(want, got, slices.Equal) {
+			t.Fatalf("per-key reconstruction differs:\n got: %q\nwant: %q", got, want)
+		}
+		if ml.Len() != 0 || ml.Bytes() != 0 || len(ml.Keys(nil)) != 0 {
+			t.Fatalf("aggregator not empty after Stop: Len=%d Bytes=%d Keys=%q",
+				ml.Len(), ml.Bytes(), ml.Keys(nil))
 		}
 	})
 }

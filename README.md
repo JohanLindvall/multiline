@@ -14,18 +14,25 @@ ordinary single-line logs straight through untouched.
 
 ## Supported formats
 
-- Go (`panic:`, runtime `fatal error:` crashes, `SIGQUIT:` dumps, and their
-  goroutine blocks)
-- Java / JVM (with or without an exception message; also claims Node.js
-  traces with an error-class headline like `TypeError:`, which share the
-  `at ...` frame shape)
+- Go (`panic:`, runtime `fatal error:` crashes, `SIGQUIT:` dumps, nested and
+  deferred panics, and their goroutine blocks)
+- Java / JVM (with or without an exception message, `Caused by:`,
+  `Suppressed:` and `... N more`; also claims Node.js traces with an
+  error-class headline like `TypeError:`, which share the `at ...` frame
+  shape. A message spanning several lines is *not* joined — see
+  [Known limits](#known-limits))
 - Node.js (bare `Error:` headlines and V8 stack-trace markers)
-- Python (including chained exceptions and non-`Error` terminators such as
-  `KeyboardInterrupt`)
+- Python (both chaining separators — the explicit `raise ... from ...` one and
+  the implicit `During handling of the above exception ...` — the
+  `[Previous line repeated N more times]` elision marker, and non-`Error`
+  terminators such as `KeyboardInterrupt`)
 - .NET (reported as `dotnet` even when its `   at ` frames would also satisfy
   Java's)
-- Ruby
-- Rust (panics, with or without backtrace)
+- Ruby (both the `` `method' `` and 3.4+ `'method'` quotings, and the
+  `Errno::*`, `*Timeout` and `*NotFound` families alongside `*Error` /
+  `*Exception` — see [Known limits](#known-limits) for the classes left out)
+- Rust (panics with or without backtrace, including the `assert_eq!`
+  left/right payload)
 - PHP
 - Elixir
 - Kubernetes CRI partial lines (via the [cri](cri) subpackage, see
@@ -158,9 +165,11 @@ always accounts for every input line (`0` means unlimited):
   cardinality explosions.
 - `WithMaxTotalBytes(n)` — cap the text bytes buffered across *all* groups
   (the `Bytes()` gauge); least recently touched groups are flushed until the
-  total fits. This bounds the aggregator's memory directly, whatever the key
-  cardinality; pair it with `WithMaxBytes` since the most recently touched
-  group itself is never evicted.
+  total fits. This bounds retained text whatever the key cardinality; pair it
+  with `WithMaxBytes`, since the most recently touched group itself is never
+  evicted, and with `WithMaxGroups`, since the per-group overhead (the group,
+  its key, its map entry — a few hundred bytes) is not charged against the
+  cap.
 
 ```go
 ml := multiline.New(emit,
@@ -220,7 +229,14 @@ Notes:
   pattern with no provable case-sensitive literal of at least 3 bytes simply
   runs on every line while the rest keep filtering —
   `StateMachine.UnfilteredStarts()` reports such patterns, worth asserting
-  empty in a test when adding a set to a hot path.
+  empty in a test when adding a set to a hot path. It reports them whether or
+  not the prefilter ended up enabled, so the check is meaningful even for a
+  machine where nothing at all was provable.
+- `Step` tracks at most `patterns.MaxActiveStates` distinct states for one
+  line. That counts the successors a single line reaches, not the transitions
+  declared on a state — the bundled sets declare 15 transitions on the start
+  state but never exceed an active width of 3 — so only an unusually
+  ambiguous set can reach it.
 - For full control you can implement the `multiline.Matcher` interface
   directly instead of compiling state sets (plus `multiline.FinalMatcher` to
   get completed groups emitted without waiting for the next line).
@@ -249,8 +265,10 @@ logs := cri.New(traces.AddAt)
 err := logs.Add(ctx, containerID, rawLine, data)
 ```
 
-`cri.New` accepts the same `WithMaxLines` / `WithMaxBytes` / `WithMaxGroups`
-options to bound fragment buffering, and has its own `Flush`, `FlushBefore`,
+`cri.New` accepts the same `WithMaxLines` / `WithMaxBytes` / `WithMaxGroups` /
+`WithMaxTotalBytes` / `WithClock` options to bound fragment buffering
+(`WithMatcher` and `WithoutText` are this stage's to set, not yours), and has
+its own `Flush`, `FlushBefore`,
 `Stop` (stop the upstream stage first) and `Pending` / `Len` / `Bytes`
 gauges. A fragment run is handed on the moment its closing `F` line arrives —
 nothing waits for the stream's next line. Lines that
@@ -265,9 +283,48 @@ path, roughly halving the per-line cost. Its `(line, ok)` parameters mirror
 l, ok := cri.Parse(raw)
 // ...derive key from l...
 err := logs.AddParsed(ctx, key, raw, l, ok, data)
-``` A runnable pipeline lives in
-[examples/cri](examples/cri/main.go) (`go run ./examples/cri`). Docker's
-json-file driver is a different format and needs JSON unwrapping instead.
+```
+
+An empty key means "do not buffer" here too, so fragments are passed through
+one by one instead of being rejoined; pass a real key to get rejoining. Lines
+that are not CRI-formatted keep the bare key, unsuffixed, alongside the
+`<key>/<stream>` keys the rejoined lines arrive under.
+
+A runnable pipeline lives in [examples/cri](examples/cri/main.go)
+(`go run ./examples/cri`). Docker's json-file driver is a different format and
+needs JSON unwrapping instead.
+
+## Known limits
+
+Deliberate trade-offs, so you can tell them from bugs:
+
+- **Java messages spanning several lines are not joined.** When a JVM message
+  runs past one line (Oracle `ORA-` chains, AssertJ expected-vs-actual blocks),
+  the trace is emitted line by line rather than as one entry. The obvious fix —
+  a bounded message-continuation state, which the `dotnet` set does use — was
+  measured and rejected: it merges an unrelated line sitting between a headline
+  and its first frame into the trace, and collapses two consecutive headlines
+  into one entry. Swallowing a distinct log record inside another is a worse
+  failure for a shipper than splitting a trace.
+- **A Ruby exception whose class is outside the recognized families is not
+  joined**, nor is a message-less one that prints no parenthesised class at all
+  (`Interrupt`). The headline is anchored on that trailing class precisely
+  because it is what gives the prefilter a rare literal to gate on; anchoring
+  on the `:in 'method':` shape instead would cover every class but make every
+  Rails backtrace line and every JSON log carrying a caller field run an
+  expensive regex — measured 8-22x slower at the matcher.
+- **Node.js traces with an error-class headline are reported as `java`.**
+  `TypeError: ...` and a JVM exception headline share the `at ...` frame shape
+  and cannot be told apart by line shape alone; only bare `Error:` headlines
+  and the V8 marker report `nodejs`.
+- **An empty key bypasses aggregation** in both stages — it is the "pass this
+  through untouched" sentinel, not a real key. In the `cri` stage that means
+  fragments are handed on individually rather than rejoined.
+- **`WithMaxTotalBytes` bounds retained text, not total memory.** Per-group
+  overhead is not charged against it; see [Bounding memory](#bounding-memory).
+- **`FlushBefore` assumes non-decreasing times** across `Add`/`AddAt` calls,
+  since it walks groups in last-touched order and stops at the first one that
+  is new enough.
 
 ## License
 

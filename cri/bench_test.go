@@ -2,6 +2,7 @@ package cri
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,6 +35,35 @@ func BenchmarkAddParsedFull(b *testing.B) {
 	for range b.N {
 		if err := a.AddParsed(ctx, "container-1", line, l, ok, struct{}{}); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkAddFragmentsLarge measures rejoining a realistically sized run.
+// BenchmarkAddFragments below uses tiny fragments, which is convenient but not
+// why fragments exist: containerd and CRI-O emit them only because a line
+// exceeded their ~16 KiB read buffer, so a real run is a handful of 16 KiB
+// pieces. That is the size at which the builder's growth strategy matters:
+// sizing it to the exact content up front replaces the repeated recopying of
+// the accumulated prefix with one allocation, and — because Builder.String
+// hands out the whole backing array — leaves no stripped CRI prefix attached
+// to the result. Watch both the byte count and the allocation count here.
+func BenchmarkAddFragmentsLarge(b *testing.B) {
+	a := New(func(_ context.Context, _, _ string, _ time.Time, _ struct{}) error { return nil })
+	ctx := context.Background()
+	const prefix = "2024-01-01T10:00:00.000000001Z stdout P "
+	chunk := strings.Repeat("x", 16<<10)
+	run := make([]string, 0, 9)
+	for range 8 {
+		run = append(run, prefix+chunk)
+	}
+	run = append(run, "2024-01-01T10:00:00.000000009Z stdout F "+chunk)
+	b.ReportAllocs()
+	for range b.N {
+		for _, line := range run {
+			if err := a.Add(ctx, "container-1", line, struct{}{}); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 }
