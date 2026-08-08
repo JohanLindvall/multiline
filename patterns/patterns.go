@@ -176,7 +176,7 @@ func MustCompile(sets ...StateSet) *StateMachine {
 // for a single line, guarding against a pathological set blowing up the active
 // set. It counts the distinct successor states one line reaches from the
 // current active set, not the transitions declared on a state: the bundled
-// sets declare 15 transitions on the start state alone but never exceed an
+// sets declare 16 transitions on the start state alone but never exceed an
 // active width of 3. A set whose successors can genuinely exceed this on one
 // line will have the excess dropped in declaration order — see Step.
 const MaxActiveStates = 20

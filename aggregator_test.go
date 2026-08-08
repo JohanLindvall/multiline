@@ -3,6 +3,7 @@ package multiline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -155,12 +156,16 @@ func TestReentrantEmitter(t *testing.T) {
 func TestReentrantEmitterSameKey(t *testing.T) {
 	var ml *Aggregator[int]
 	var got []string
-	reentered := false
+	// Re-enter on the first two entries, not just the first. Draining the key
+	// runs the emitter again, which claims the key again, so a one-shot check
+	// in place of the loop leaves the second group orphaned — with a single
+	// re-entry it would pass and pin nothing.
+	reentries := 0
 	ml = New(func(ctx context.Context, e Entry[int]) error {
 		got = append(got, e.Text)
-		if !reentered {
-			reentered = true
-			return ml.Add(ctx, "k", "panic: reentrant", 99)
+		if reentries < 2 {
+			reentries++
+			return ml.Add(ctx, "k", fmt.Sprintf("panic: reentrant%d", reentries), 99)
 		}
 		return nil
 	})
@@ -182,9 +187,11 @@ func TestReentrantEmitterSameKey(t *testing.T) {
 	assert.Equal(t, 0, ml.Bytes(), "flushing the key must leave nothing buffered under it")
 
 	assert.NoError(t, ml.Stop(ctx))
-	// The re-entrant line arrived after "panic: y" was emitted and before
-	// "panic: z" was buffered, and comes out in exactly that position.
-	assert.Equal(t, []string{"panic: y", "panic: reentrant", "panic: z"}, got)
+	// Each re-entrant line arrived after the entry being handled was emitted
+	// and before "panic: z" was buffered, and they come out in that order.
+	assert.Equal(t, []string{
+		"panic: y", "panic: reentrant1", "panic: reentrant2", "panic: z",
+	}, got)
 }
 
 // TestKeys verifies that Keys reports pending keys in last-touched order.

@@ -142,6 +142,12 @@ func FuzzMultiKeyConservation(f *testing.F) {
 	f.Add("java.lang.NullPointerException: x\n\tat a.b(C.java:1)\nplain\npanic: z\n\ngoroutine 5 [running]:", 3, 0, 0)
 	f.Add("no\ntraces\nhere\nat all", 4, 1, 8)
 	f.Add("", 1, 0, 0)
+	// Lines go to key i%keys, so a trace only forms if its lines are spaced
+	// `keys` apart. These two seeds are what actually reach the properties this
+	// fuzzer exists for: a group that aggregates, and a group cap below the
+	// live key count so eviction runs.
+	f.Add("panic: a\nX\n\nY\ngoroutine 1 [running]:\nZ\nmain.main()\nW\n\t/x.go:1 +0x1\nV", 5, 1, 0)
+	f.Add("panic: a\nX\n\nY\ngoroutine 1 [running]:\nZ\nmain.main()\nW\n\t/x.go:1 +0x1\nV", 5, 0, 16)
 
 	f.Fuzz(func(t *testing.T, input string, keys, maxGroups, maxTotalBytes int) {
 		keys = abs(keys)%4 + 1

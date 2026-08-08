@@ -189,8 +189,16 @@ described the shape.
 - The ruby headline must end in a parenthesised class, and its class
   alternation is deliberately kept *adjacent to the closing paren* so the
   prefilter derives `"Error)"`, `"Exception)"`, `"Timeout)"`, `"NotFound)"` and
-  `" (Errno::"` — rare literals, the first two of which fold in as children of
-  the existing `Error`/`Exception` roots. Anchoring on the
+  `"(Errno::"` — rare literals, the first two of which fold in as children of
+  the existing `Error`/`Exception` roots. The `\s` before `\(` in the Errno
+  pattern is load-bearing: a literal space would join the exact run and make the
+  probe `" (Errno::"`, and a space-leading probe is pathological, because
+  `strings.Contains` only brute-forces below `bytealg.MaxBruteForce` (64 bytes
+  on amd64, **16 on arm64**, which CI also builds) and above it scans for the
+  probe's first byte — so every space in every line becomes a false positive.
+  Measured 153ns vs 14ns per line on a 94-byte access-log line, against a
+  ~105ns/line budget for the whole matcher. `TestBundledPrefilterEnabled`
+  rejects any space-leading probe. Anchoring on the
   `<file>:<line>:in <method>:` shape instead covers more classes but its only
   provable literal is `":in "`, which ordinary Ruby-adjacent lines carry
   constantly (a Rails backtrace line, a JSON log with a caller field); every

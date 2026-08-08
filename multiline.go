@@ -55,9 +55,15 @@ type Entry[T any] struct {
 
 // Emitter receives completed entries. Returning an error is reported by the
 // Add or flush call that produced the entry, and the first such error wins.
-// It does not abort that call: an Add still accounts for its own line, which
-// is buffered or emitted even when a flush it triggered failed. Lines already
-// buffered in the same group are not re-delivered.
+// The two kinds of call differ in what they do next:
+//
+//   - Add and AddAt never abort. The line is still buffered or emitted even
+//     when a flush it triggered failed, so no input is lost to the error.
+//   - Flush, FlushBefore and Stop stop at the first group that fails. Groups
+//     they had not reached yet stay pending, so a retry resumes there.
+//
+// Either way, lines already buffered in a group that was emitted are not
+// re-delivered.
 //
 // An emitter may feed the same Aggregator again — that is how stages are
 // chained — but one that re-enters under the key it is currently handling

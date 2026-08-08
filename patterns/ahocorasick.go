@@ -19,9 +19,10 @@ package patterns
 //
 // It is compared against the number of *root* probes, not the total: the
 // linear scan walks the roots and reaches a child only when its parent stem
-// hit, so the roots are what a typical line actually pays for. The bundled
-// sets carry 23 probes over 16 roots, and the linear loop wins clearly there;
-// Aho-Corasick takes over from roughly twice that.
+// hit, so the roots are what a typical line actually pays for. The total is
+// kept as a backstop at twice this value, since a stem hit walks the whole
+// child region. The bundled sets carry 23 probes over 16 roots, so both tests
+// fail and they stay on the linear loop, which wins clearly at that size.
 const acMinLiterals = 24
 
 // ahoCorasick is a dense-table Aho-Corasick automaton over the probe

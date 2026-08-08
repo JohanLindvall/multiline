@@ -179,8 +179,9 @@ type Aggregator[T any] struct {
 // apply to the fragment buffering, measured on the raw lines: WithMaxLines and
 // WithMaxBytes bound a single fragment run (an over-limit run is passed on
 // silently truncated), WithMaxGroups and WithMaxTotalBytes bound the tracked
-// streams, and WithClock supplies the staleness clock FlushBefore compares
-// against. Two options are not the caller's to choose: WithMatcher is
+// streams. WithClock is accepted but does nothing here: every buffered
+// fragment carries its own parsed log timestamp, so FlushBefore always
+// compares against those. Two options are not the caller's to choose: WithMatcher is
 // overridden with the CRI fragment matcher, and WithoutText is forced, since
 // rejoin consumes Entry.Texts and never needs the joined form.
 func New[T any](next Next[T], opts ...multiline.Option) *Aggregator[T] {
@@ -267,8 +268,9 @@ func (a *Aggregator[T]) rejoin(ctx context.Context, e multiline.Entry[T]) error 
 	// Size the builder on the content, not on the raw bytes: Builder.String
 	// hands out the whole backing array, so growing to the raw size would
 	// leave every stripped CRI prefix permanently attached to the rejoined
-	// line. Recomputing the content is two IndexByte calls per fragment,
-	// nothing against the copy the single allocation saves.
+	// line. Recomputing the content is one extra prefix split per fragment
+	// (four IndexByte calls and two short compares), nothing against the copy
+	// the single allocation saves.
 	n := 0
 	for i := range e.Texts {
 		n += len(fragmentContent(e, i))

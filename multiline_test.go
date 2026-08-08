@@ -38,8 +38,14 @@ var corpusFormat = map[string]string{
 // the directory is being checked against a format nothing can produce.
 func TestCorpusCoversEveryBundledSet(t *testing.T) {
 	covered := make(map[string]bool, len(corpusFormat))
-	for _, format := range corpusFormat {
+	for dir, format := range corpusFormat {
 		covered[format] = true
+		// Naming a directory is not the same as having one: without this the
+		// entry alone would satisfy the check and a set could still ship with
+		// no corpus at all.
+		files, err := os.ReadDir(filepath.Join("tests", dir))
+		assert.NoError(t, err, "corpusFormat names directory %q, which does not exist", dir)
+		assert.NotEmpty(t, files, "corpus directory %q is empty", dir)
 	}
 	for _, set := range patterns.All {
 		assert.True(t, covered[set.Name], "bundled set %q has no corpus directory", set.Name)

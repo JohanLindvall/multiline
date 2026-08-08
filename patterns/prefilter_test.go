@@ -133,6 +133,16 @@ func TestBundledPrefilterEnabled(t *testing.T) {
 	assert.NotEmpty(t, lits)
 	for _, l := range lits {
 		assert.GreaterOrEqual(t, len(l), 3, "weak probe %q", l)
+		// A probe is scanned with strings.Contains, which only brute-forces
+		// while the line is shorter than bytealg.MaxBruteForce (64 bytes on
+		// amd64, 16 on arm64); above that it scans for the probe's first byte.
+		// So a probe starting on a byte that is common in log text degrades
+		// into one false positive per occurrence. Space is the worst offender
+		// and the easy one to write by accident, since a literal space in a
+		// pattern joins the derived literal run — use "\s" to keep it out.
+		// Measured at 153ns vs 14ns per line for " (Errno::" vs "(Errno::".
+		assert.NotEqual(t, byte(' '), l[0],
+			"probe %q starts with a space: every space in every line becomes a false positive", l)
 	}
 	// Every bundled start pattern must stay narrowable; a fallback here costs
 	// every line of every stream a regex.
@@ -301,7 +311,7 @@ func TestPrefilterMasks(t *testing.T) {
 	assert.Equal(t, uint64(1<<11), maskOf("Exception)"))
 	assert.Equal(t, uint64(1<<11), maskOf("Timeout)"))
 	assert.Equal(t, uint64(1<<11), maskOf("NotFound)"))
-	assert.Equal(t, uint64(1<<12), maskOf(" (Errno::"))
+	assert.Equal(t, uint64(1<<12), maskOf("(Errno::"))
 	assert.Equal(t, uint64(1<<13), maskOf("' panicked at "))
 	assert.Equal(t, uint64(1<<14), maskOf("Fatal error:"))
 	assert.Equal(t, uint64(1<<15), maskOf("** ("))

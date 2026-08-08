@@ -59,9 +59,10 @@ type prefilter struct {
 	always     uint64
 	wide       bool
 	unfiltered []string
-	// ac replaces the linear Contains scan when the literal count crosses
-	// acMinLiterals (see ahocorasick.go); nil otherwise. It needs no parent
-	// logic: the automaton visits every literal in one pass regardless.
+	// ac replaces the linear Contains scan when the root count crosses
+	// acMinLiterals, or the total probe count crosses twice it (see
+	// ahocorasick.go); nil otherwise. It needs no parent logic: the automaton
+	// visits every literal in one pass regardless.
 	ac *ahoCorasick
 }
 

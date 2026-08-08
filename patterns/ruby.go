@@ -39,9 +39,23 @@ var Ruby = StateSet{Name: "ruby", States: []State{
 		// "Exception)", "Timeout)", "NotFound)", and the Errno form yields
 		// "(Errno::". Folding both into one group would break the run and
 		// leave only the bare words, which are far weaker probes.
+		//
+		// The "\s" before "\(" in the Errno pattern is load-bearing and must
+		// not be simplified back to a literal space. A space would join the
+		// exact run and make the probe " (Errno::", and a probe whose first
+		// byte is a space is pathological: strings.Contains only brute-forces
+		// while the line is short (bytealg.MaxBruteForce, 64 bytes on amd64
+		// but 16 on arm64, which CI also builds), and above that it scans for
+		// the probe's first byte — so every space in every log line becomes a
+		// false positive. Measured on a 94-byte access-log line: 153ns for
+		// " (Errno::" against 14ns for "(Errno::", against a ~105ns/line
+		// budget for the whole matcher. TestBundledPrefilterEnabled rejects
+		// any space-leading probe so this cannot come back.
 		Transitions: []Transition{
 			{Pattern: `^\S+:\d+:in .+: .+ \([A-Z][A-Za-z0-9_:]*(Error|Exception|Timeout|NotFound)\)$`, Next: "error"},
-			{Pattern: `^\S+:\d+:in .+: .+ \(Errno::[A-Z]+\)$`, Next: "error"},
+			// [A-Z0-9] because five errno constants carry a digit: E2BIG,
+			// EL2HLT, EL2NSYNC, EL3HLT, EL3RST.
+			{Pattern: `^\S+:\d+:in .+: .+\s\(Errno::[A-Z0-9]+\)$`, Next: "error"},
 		},
 	},
 	{Name: "error", NonTerminal: true, Transitions: rubyFrame},

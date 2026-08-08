@@ -234,7 +234,7 @@ Notes:
   machine where nothing at all was provable.
 - `Step` tracks at most `patterns.MaxActiveStates` distinct states for one
   line. That counts the successors a single line reaches, not the transitions
-  declared on a state — the bundled sets declare 15 transitions on the start
+  declared on a state — the bundled sets declare 16 transitions on the start
   state but never exceed an active width of 3 — so only an unusually
   ambiguous set can reach it.
 - For full control you can implement the `multiline.Matcher` interface
