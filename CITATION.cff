@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using the metadata from this file.
+type: software
+title: multiline
+abstract: >-
+  A dependency-free Go library for log shippers that rejoins multi-line log
+  records into single entries: Go panics; Java, .NET, Node.js, Python, Ruby,
+  Rust, PHP and Elixir stack traces; and Kubernetes CRI partial lines.
+authors:
+  - family-names: Lindvall
+    given-names: Johan
+repository-code: https://github.com/JohanLindvall/multiline
+url: https://pkg.go.dev/github.com/JohanLindvall/multiline
+license: MIT
+keywords:
+  - go
+  - logging
+  - log aggregation
+  - multiline logs
+  - stack traces
+  - kubernetes

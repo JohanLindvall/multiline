@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // rustFrame continues a backtrace: numbered frames and their "at" locations.

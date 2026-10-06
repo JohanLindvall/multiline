@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // All lists the bundled state sets; the default matcher of multiline.New is

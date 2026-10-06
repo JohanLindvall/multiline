@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // rubyFrame continues a backtrace ("\tfrom file.rb:8:in `baz'").

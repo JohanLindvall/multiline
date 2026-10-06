@@ -1,16 +1,79 @@
-# Multiline
+# multiline
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/JohanLindvall/multiline.svg)](https://pkg.go.dev/github.com/JohanLindvall/multiline)
 [![CI](https://github.com/JohanLindvall/multiline/actions/workflows/ci.yml/badge.svg)](https://github.com/JohanLindvall/multiline/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/JohanLindvall/multiline.svg)](https://pkg.go.dev/github.com/JohanLindvall/multiline)
+[![Latest version](https://img.shields.io/github/v/tag/JohanLindvall/multiline?sort=semver&label=version)](https://github.com/JohanLindvall/multiline/tags)
+[![Go version](https://img.shields.io/github/go-mod/go-version/JohanLindvall/multiline)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-`multiline` is a small, dependency-free Go library that aggregates log output
-spanning several physical lines — such as panic and exception stack traces —
-back into a single logical entry.
+`multiline` is a dependency-free Go library that rejoins multi-line log
+records — Go panics; Java, .NET, Node.js, Python, Ruby, Rust, PHP and Elixir
+stack traces; and the partial lines Kubernetes container runtimes (CRI) split
+long lines into — so a log shipper forwards each stack trace as one record
+instead of one record per line. Ordinary lines pass straight through, and
+every joined entry names the format that matched it.
 
-Many log shippers treat each newline as a separate record, which scatters a
-single stack trace across many entries. `multiline` recognizes the start and
-continuation patterns of common stack traces and re-joins them, while passing
-ordinary single-line logs straight through untouched.
+- **Cheap on ordinary lines.** A literal prefilter derived from the start
+  patterns rejects most lines before any regex runs — zero allocations, on the
+  order of 100 ns per line (`make bench`).
+- **Lossless unless you cap it.** Fuzzers check that no line is lost,
+  duplicated or reordered — across interleaved keys, time-based flushes and
+  evictions — and that when an optional size cap does drop text, the entry
+  that lost it is flagged `Truncated` and its `Lines` still counts every line.
+- **Bounded.** Optional caps on lines and bytes per entry, on the number of
+  keys buffering at once, and on total buffered bytes.
+- **Sans-IO.** No goroutines and no I/O: you feed it lines and get entries back
+  through a callback; tailing, flush timers and shipping stay yours.
+
+## Quick start
+
+```sh
+go get github.com/JohanLindvall/multiline
+```
+
+```go
+// The emitter is called once per completed entry.
+ml := multiline.New(func(_ context.Context, e multiline.Entry[any]) error {
+	if e.Match != "" {
+		fmt.Printf("[stacktrace %s, %d lines]\n%s\n\n", e.Match, e.Lines, e.Text)
+	} else {
+		fmt.Printf("[plain] %s\n", e.Text)
+	}
+	return nil
+})
+
+// The key groups related lines together; use e.g. a container id in real use.
+for _, line := range log {
+	if err := ml.Add(ctx, "key", line, nil); err != nil {
+		panic(err)
+	}
+}
+
+// Flush anything still buffered.
+if err := ml.Stop(ctx); err != nil {
+	panic(err)
+}
+```
+
+Fed a log with a Go panic in the middle, it prints:
+
+```text
+[plain] server started
+[stacktrace go, 8 lines]
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x123456]
+
+goroutine 1 [running]:
+main.handler(0x0)
+	/app/main.go:42 +0x1d
+main.main()
+	/app/main.go:17 +0x2b
+
+[plain] shutting down
+```
+
+**[▶ Run it in the Go Playground](https://go.dev/play/p/ri6EXc_NCqj)** and swap
+in lines from your own logs, or run it locally with `go run ./examples/simple`.
 
 ## Supported formats
 
@@ -38,12 +101,6 @@ ordinary single-line logs straight through untouched.
 - Kubernetes CRI partial lines (via the [cri](cri) subpackage, see
   [CRI partial lines](#kubernetes-cri-partial-lines))
 
-## Install
-
-```sh
-go get github.com/JohanLindvall/multiline
-```
-
 ## How it works
 
 You create an `Aggregator[T]` with an emitter callback and feed it lines one
@@ -65,50 +122,9 @@ receives an `Entry`:
 
 `T` is a generic payload you attach to each line — a log timestamp, a file
 offset for checkpointing, or `struct{}` if you don't need one. An
-`Aggregator` is not safe for concurrent use.
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/JohanLindvall/multiline"
-)
-
-func main() {
-	ml := multiline.New(func(_ context.Context, e multiline.Entry[any]) error {
-		if e.Match != "" {
-			fmt.Printf("[stacktrace %s]\n%s\n\n", e.Match, e.Text)
-		} else {
-			fmt.Printf("[plain] %s\n", e.Text)
-		}
-		return nil
-	})
-
-	ctx := context.Background()
-	for _, line := range []string{
-		"server started",
-		"panic: runtime error: invalid memory address or nil pointer dereference",
-		"",
-		"goroutine 1 [running]:",
-		"main.handler(0x0)",
-		"\t/app/main.go:42 +0x1d",
-		"shutting down",
-	} {
-		if err := ml.Add(ctx, "key", line, nil); err != nil {
-			panic(err)
-		}
-	}
-	if err := ml.Stop(ctx); err != nil {
-		panic(err)
-	}
-}
-```
-
-The runnable version lives in [examples/simple](examples/simple/main.go)
-(`go run ./examples/simple`).
+`Aggregator` is not safe for concurrent use. The [quick start](#quick-start)
+shows the whole loop; its full program is
+[examples/simple](examples/simple/main.go).
 
 ### Methods
 
@@ -325,6 +341,11 @@ Deliberate trade-offs, so you can tell them from bugs:
 - **`FlushBefore` assumes non-decreasing times** across `Add`/`AddAt` calls,
   since it walks groups in last-touched order and stops at the first one that
   is new enough.
+
+## Security
+
+Please report vulnerabilities privately, not in a public issue — see
+[SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // elixirFrame continues a stack trace. Elixir frames are indented and carry

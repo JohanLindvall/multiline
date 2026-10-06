@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // pythonTraceback starts (or, after a chained-exception separator, restarts)

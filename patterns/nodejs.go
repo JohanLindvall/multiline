@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // NodeJS matches Node.js / V8 error stack traces whose headline the java set

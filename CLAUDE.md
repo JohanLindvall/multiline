@@ -49,6 +49,20 @@ Use the Makefile (same shape as JohanLindvall/lightning):
   split and recover the first fragment's time from `Entry.When` — don't
   reintroduce `Parse` calls on buffered lines
 - `tests/<format>/*.txt` — corpus files, the behavioral spec
+- `SECURITY.md`, `CITATION.cff` — adoption files. `SECURITY.md` links GitHub's
+  private vulnerability reporting form, which is enabled in the repo settings.
+  `CITATION.cff` deliberately has no `version`/`date-released`: CI tags every
+  green main, so a pinned version would always be stale
+
+## README quick start
+
+The quick start is the README's five-second pitch, so it must not rot: its Go
+block is a verbatim excerpt of `examples/simple/main.go`, its output block is
+the verbatim output of `go run ./examples/simple`, and its Go Playground link
+(go.dev/play/p/ri6EXc_NCqj) runs that program pinned to v0.0.13 by a
+`-- go.mod --` section. Changing the example means updating all three. To
+re-share, POST the program to `https://go.dev/_/share` with
+`Content-Type: text/plain` — curl's default form type stores an empty snippet.
 
 ## Matcher semantics (the part worth re-reading)
 
@@ -222,3 +236,7 @@ described the shape.
 - go.mod declares `go 1.22` (needs range-over-int); don't let tooling bump it
   to the local toolchain version, and don't use newer stdlib/testing APIs
   (e.g. `b.Loop`, `strings.SplitSeq`) without raising it deliberately.
+- Every `.go` file, tests and examples included, starts with
+  `// SPDX-License-Identifier: MIT` and a blank line; `TestSPDXHeaders`
+  enforces both. The blank line keeps the header out of the package doc
+  comment, whose first sentence is the package synopsis on pkg.go.dev.

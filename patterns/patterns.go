@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package patterns contains the declarative state-machine matcher used by the
 // multiline aggregator, together with the bundled stack-trace definitions for
 // common languages (see [All]).

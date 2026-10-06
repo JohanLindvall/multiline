@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command cri shows the two-stage Kubernetes pipeline: the cri package
 // rejoins CRI partial-line fragments into whole application lines and feeds
 // them — prefixes stripped, keyed per stream, stamped with their log

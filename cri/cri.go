@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package cri rejoins Kubernetes CRI log lines back into whole application
 // lines, as a stage in front of stack-trace aggregation.
 //

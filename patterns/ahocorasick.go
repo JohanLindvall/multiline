@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // The prefilter scans each line for its probe literals. With a handful of

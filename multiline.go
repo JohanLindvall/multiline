@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package multiline aggregates log output spanning several physical lines —
 // such as panic and exception stack traces — back into a single logical
 // entry. Lines are fed one at a time to an [Aggregator], grouped per key, and

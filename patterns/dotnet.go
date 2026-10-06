@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns
 
 // dotnetBody continues a stack trace once the exception message has been

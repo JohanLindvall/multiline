@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package patterns_test
 
 import (
