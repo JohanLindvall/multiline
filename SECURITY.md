@@ -15,9 +15,10 @@ problem — for a crash, include the panic and its stack trace.
 
 ## Supported versions
 
-`multiline` is pre-1.0 and released continuously: every green build of `main`
-is tagged as the next `v0.0.x` version. A fix ships in the next tag; earlier
-tags are not patched, so upgrade to the latest version to pick it up.
+`multiline` is pre-1.0 and released continuously: a green build of the current
+`main` commit receives the next patch tag and a GitHub release. A fix ships in
+the next tag; earlier tags are not patched, so upgrade to the latest version
+to pick it up.
 
 ## Scope
 

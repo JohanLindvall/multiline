@@ -1,0 +1,16 @@
+name: Usage question
+description: Get help choosing a matcher, configuring bounds, or integrating the library.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The [usage guide](https://github.com/JohanLindvall/multiline/blob/main/docs/usage.md)
+        includes flushing, memory bounds, CRI integration, and troubleshooting.
+  - type: textarea
+    id: question
+    attributes:
+      label: How can we help?
+      description: Describe your goal and what you have tried. Include a version and small sanitized example if relevant.
+    validations:
+      required: true

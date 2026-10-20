@@ -7,29 +7,33 @@ I/O ("sans-IO").
 
 ## Commands
 
-Use the Makefile (same shape as JohanLindvall/lightning):
+Use the Makefile; `make` / `make help` lists the commands:
 
 - `make test` — full suite with coverage, including the corpus tests under
   `tests/`
-- `make check` — golangci-lint (installed on demand) + test; keep it at 0
-  issues
+- `make check` — formatting check, tests, vet, and golangci-lint; keep it at 0
+  issues. `.golangci-version` pins the linter for both local and CI use;
+  local tools are installed on demand under the ignored `.tools/` directory
 - `make fix` — gofmt + go mod tidy
+- `make race`, `make examples` — race-detector suite and all runnable examples
 - `make bench` — benchmarks (the no-match path must stay on the prefilter
   fast path: ~105ns/line at the matcher, ~130ns/line through the
   aggregator; see below)
-- `make fuzz` — 30s bursts of all four fuzzers, one per property: uncapped
+- `make fuzz` — 30s bursts (override with `FUZZTIME=5s`) of all four fuzzers,
+  one per property: uncapped
   conservation (no line lost/duplicated/reordered), capped conservation
   (`Entry.Lines` sums to the lines consumed under `WithMaxLines`/`WithMaxBytes`,
   and `Truncated` lands on exactly the entry that lost text), multi-key
   conservation (interleaved keys, `AddAt`, `FlushBefore` and both eviction
   caps, none of which may drop text), and cri rejoin conservation (the CRI
   stage repackages content without changing it)
-- CI (`.github/workflows/ci.yml`) mirrors lightning: one check job per arch
-  (amd64+arm64) running `make test`, lint once on amd64 via
-  golangci-lint-action pinned to v2.12.2, a `race-and-fuzz` job (`go test
-  -race`, `make fuzz`, benchmarks at `-benchtime=1x`, uploading any crasher
-  under `testdata/fuzz/` on failure), and auto patch-tagging on green main
-  once both jobs pass
+- CI (`.github/workflows/ci.yml`) tests Go 1.22 and stable, Linux amd64/arm64,
+  macOS, and Windows. Lint, formatting, module tidiness, and examples run
+  separately on stable Go. The `race-and-fuzz` job runs `make race`, `make fuzz`,
+  and benchmarks at `-benchtime=1x`, uploading crashers under `testdata/fuzz/`.
+  Only after all checks pass, `.github/scripts/release.sh` publishes a patch
+  tag and generated GitHub release notes for the current main commit.
+  Actions are SHA-pinned and maintained by Dependabot
 
 ## Layout
 
@@ -49,16 +53,20 @@ Use the Makefile (same shape as JohanLindvall/lightning):
   split and recover the first fragment's time from `Entry.When` — don't
   reintroduce `Parse` calls on buffered lines
 - `tests/<format>/*.txt` — corpus files, the behavioral spec
+- `CONTRIBUTING.md` — public setup, corpus, testing, and PR guidance
+- `docs/usage.md` — detailed integration guide; keep the README focused on
+  the quick start, format summary, examples, and links
 - `SECURITY.md`, `CITATION.cff` — adoption files. `SECURITY.md` links GitHub's
   private vulnerability reporting form, which is enabled in the repo settings.
-  `CITATION.cff` deliberately has no `version`/`date-released`: CI tags every
-  green main, so a pinned version would always be stale
+  `CITATION.cff` deliberately has no `version`/`date-released`: CI tags green
+  main commits, so a pinned version would always be stale
 
 ## README quick start
 
 The quick start is the README's five-second pitch, so it must not rot: its Go
-block is a verbatim excerpt of `examples/simple/main.go`, its output block is
-the verbatim output of `go run ./examples/simple`, and its Go Playground link
+block is the complete `examples/simple/main.go` program without its SPDX
+header, its output block is the verbatim output of `go run ./examples/simple`,
+and its Go Playground link
 (go.dev/play/p/ri6EXc_NCqj) runs that program pinned to v0.0.13 by a
 `-- go.mod --` section. Changing the example means updating all three. To
 re-share, POST the program to `https://go.dev/_/share` with

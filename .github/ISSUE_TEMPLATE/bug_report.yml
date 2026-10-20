@@ -1,0 +1,47 @@
+name: Bug report
+description: Report incorrect grouping, unexpected output, or an integration problem.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include a small reproduction so we can turn it into a regression test.
+        Remove secrets and personal data from logs while preserving whitespace.
+        For security problems, use [private reporting](https://github.com/JohanLindvall/multiline/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: multiline version
+      description: Run `go list -m github.com/JohanLindvall/multiline` or provide a commit SHA.
+      placeholder: v0.0.x or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and configuration
+      description: Include `go version`, OS, and options passed to New or cri.New.
+      placeholder: Go version, OS, stream keys, memory caps, custom matcher, flushing schedule.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Input or reproduction
+      description: Paste the smallest log sample or Go program that reproduces the issue. Preserve tabs and blank lines.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: Show which lines should form each entry, including the expected format if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include observed grouping, errors, or a stack trace.
+      render: text
+    validations:
+      required: true

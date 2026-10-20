@@ -1,0 +1,2 @@
+# Keep source and log fixtures consistent on Windows, macOS, and Linux.
+* text=auto eol=lf

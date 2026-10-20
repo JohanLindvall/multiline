@@ -1,0 +1,23 @@
+name: Feature or format request
+description: Suggest an API improvement, a new log format, or better documentation.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe your use case and where the current behavior falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested behavior
+      description: What would make this easier? Include a sanitized input sample and expected grouping for a format request.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: Optional. Tell us what you have tried, such as a custom matcher.
